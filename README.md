@@ -80,9 +80,15 @@ and only the varying case grows. The real app has hundreds of independently
 varying meshes, hence the far larger per-frame figure.
 
 So the trade is ~150 MB of extra steady footprint against a leak, and for a
-program left open all day that is not a close call. `AZTM_RENDERER=glow` selects
-OpenGL for a short session or a machine whose DX12 path misbehaves; it is
-genuinely lighter for the first ten minutes.
+program left open all day that is not a close call.
+
+**And the loser is not shipped.** OpenGL stayed selectable behind
+`AZTM_RENDERER=glow` for a while after losing — genuinely lighter for the first ten
+minutes, and insurance for a machine where wgpu will not start. That cost 205,824
+bytes of every copy of the executable, measured, and the name went with the code
+rather than being left as an override this build can no longer honour. The table
+above is the record of why; re-running the comparison means adding eframe's `glow`
+feature back for as long as it takes to measure.
 
 **Raw `NtQuerySystemInformation`** — one syscall returns the entire process table
 (PIDs, parents, CPU times, all memory counters, handle/thread counts, I/O
@@ -399,9 +405,10 @@ application by name rather than for whatever the profile directory happens to ho
 
 Environment variables:
 
-- `AZTM_RENDERER=glow` — use OpenGL instead of wgpu/DX12. Lighter to start with,
-  but it grows; see the renderer note above.
 - `AZTM_TRACE_SAMPLE=1` — print per-phase sampler timings to stderr.
+- `AZUR_BACKEND`, `AZUR_ADAPTER=low` — the design system's, and the only renderer
+  knobs there are; there is no `AZTM_RENDERER` any more (see the renderer note
+  above).
 
 `cargo build --features memtrace` adds a counting global allocator and prints
 live heap bytes, allocation and frame counts, and the size of every long-lived
@@ -410,6 +417,51 @@ is a build-time opt-in. It is what proved the growth above was *not* on the Rust
 heap — live bytes sat at 10.8 MB while private bytes climbed — and so stopped a
 long search through this codebase for a leak that was never in it. The same build
 accepts `AZTM_UI_LEVEL=0..3` and `AZTM_NO_ICONS=1` to bisect the paint path.
+
+### Binary size
+
+```
+11,832,832 bytes  ->  8,593,920 bytes      -27.4%
+```
+
+Nothing the program does was given up except the OpenGL renderer, which is priced
+above. Every number here came out of a linked executable; where a linker map
+disagreed, the map is the one that was wrong.
+
+| Measured | Decision |
+| ---: | --- |
+| −1,418,240 | **Drop `eframe/default_fonts`.** epaint's four TrueType files were the four largest objects in the binary and **no code path could reach any of them**: `azur-egui-theme::fonts` installs from `FontDefinitions::empty()`. Free, and nothing changes on screen. |
+| −1,059,840 | **Take eframe's `wgpu_no_default_features`, not `wgpu`.** Its `wgpu` feature re-enables `egui-wgpu/default` → `wgpu/default` → every backend wgpu has, on top of the one the theme pins. Free. |
+| −555,008 | **`opt-level = "z"` on `naga`, `codespan-reporting`, `hexf-parse`.** A shader is translated once, while the window is hidden. Costs ~30 s of release build time. |
+| −205,824 | **Drop `eframe/glow`.** A second renderer that lost its measurement; `AZTM_RENDERER` went with the code. |
+| −1,024 | **`opt-level = "z"` on `image` and `png`** — attempted, reverted. Same run-once argument as `naga`, and worth a kilobyte: their code is monomorphised into the caller's codegen unit, where a per-package profile does not reach it. |
+| — | **`panic = "abort"`** was already on, and `grep -rn catch_unwind` finds nothing, so it stays available. It is the largest single profile lever in a Rust GUI (the file explorer measured 3,570,688 and could not take it); here it was taken before this audit started, which is why `.pdata` is 0.9% of the file rather than 1.9%. |
+
+The two findings worth carrying to the next program: **the fonts were dead weight
+that the theme's own manifest predicted would come back silently**, and it came back
+through this application's feature list, exactly as written there. And **a map prices
+the code that is there, while only a build shows what leaves with a feature** — the
+map attributed 78,272 bytes to the dx12 and gles crates, and removing them was worth
+1,059,840, because naga's HLSL and GLSL writers, `range-alloc`, gpu-allocator's D3D12
+path and most of the `windows` crate went with them.
+
+What is left, by defining crate, from a map of the shipped binary:
+
+| ≈ Bytes | What | Why it stays |
+| ---: | --- | --- |
+| 2.25 MB | `core`, `std`, `alloc`, `hashbrown` | this is what `panic = "abort"` already attacks |
+| 1.66 MB | `wgpu-core` (523 KB of validation), `wgpu-hal`'s Vulkan backend, `wgpu-types`, `egui-wgpu`, `ash` | no feature knobs remain |
+| 1.56 MB | `harfrust`, `skrifa`, `read-fonts`, `vello_cpu`, `fearless_simd` | **non-optional** epaint 0.35 dependencies: two CPU rasterisers and a shaper, whether or not a program draws through the GPU |
+| 633 KB | `naga` | already at `"z"`; below this is hand-writing a Vulkan painter |
+| 695 KB | this application and its theme, 30k lines | reducible only by de-monomorphising UI closures |
+| 852 KB | `egui`, `epaint`, `winit`, `eframe`, `egui-winit` | the framework |
+| 112 KB | `.rsrc` — the icon, nine PNG-compressed sizes | 1.3% of the file, and 69 KB of it is the 256px entry Explorer's largest view reads |
+
+`opt-level = "s"` for the whole graph is the one large lever left and is **not taken**:
+this is the program that prints its own frame cost in the status bar, and the file
+explorer's audit measured a comparable graph at −2,960,896 bytes for a slower frame
+path. That number is quoted from that audit rather than linked here, which is the
+only figure on this page that was not.
 
 ### The mark
 

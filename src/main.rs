@@ -63,23 +63,24 @@ fn wgpu_config() -> eframe::egui_wgpu::WgpuConfiguration {
 }
 
 fn main() -> eframe::Result<()> {
-    // Default to wgpu, despite OpenGL starting ~180 MB lighter. See `wgpu_config`
-    // for which backend, and why that part is not decided here.
+    // wgpu is the only renderer, and there is no environment variable for the other
+    // one because the other one is no longer compiled in. See `wgpu_config` for which
+    // backend, and why that part is not decided here; `AZUR_BACKEND` changes backend
+    // without leaving wgpu.
     //
-    // OpenGL starts smaller and then grows without bound: the driver keeps a
-    // buffer allocation per distinct `glBufferData` size, egui_glow uploads one
-    // buffer per mesh per frame, and a table of live numbers changes the size of
-    // every mesh every frame. Measured at ~210 KB per frame -- around 1 GB after
-    // half an hour with the window merely open. A bare eframe window with a
-    // *fixed* vertex count stays flat, and starts growing the moment the count
-    // is made to vary, which is what pins it on the size rather than on the
-    // volume or on anything in this codebase.
+    // OpenGL was here, and won on the first measurement only: a bare eframe window
+    // starts ~180 MB lighter under glow and then grows about 210 KB per painted frame,
+    // indefinitely -- around 1 GB after half an hour with the window merely open. The
+    // driver keeps an allocation per distinct `glBufferData` size, `egui_glow` uploads
+    // one buffer per mesh per frame, and a table of live numbers changes the size of
+    // nearly every mesh on every frame. A probe with a *fixed* vertex count stays
+    // flat and starts growing the moment the count is made to vary, which is what
+    // pins it on the size rather than on the volume or on anything here.
     //
-    // wgpu is flat. For a program left open all day that beats a smaller start,
-    // so this trades ~150 MB of steady footprint for a leak. `AZTM_RENDERER=glow`
-    // picks OpenGL for a short session or a machine where wgpu will not start;
-    // `AZUR_BACKEND` changes backend without leaving wgpu.
-    let use_wgpu = std::env::var("AZTM_RENDERER").as_deref() != Ok("glow");
+    // So the trade was ~150 MB of steady footprint against a leak, and for a program
+    // left open all day it was not close. Keeping the loser as an escape hatch cost
+    // 205,824 bytes of every copy of this executable; the README carries the
+    // measurements, which is what they were for.
 
     let settings = settings::Settings::load();
 
@@ -118,11 +119,7 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport,
-        renderer: if use_wgpu {
-            eframe::Renderer::Wgpu
-        } else {
-            eframe::Renderer::Glow
-        },
+        renderer: eframe::Renderer::Wgpu,
         wgpu_options: wgpu_config(),
         // The table draws thin 1px rules and small text; multisampling would
         // only blur them, and dithering is for gradients we do not have.

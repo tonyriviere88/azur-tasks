@@ -36,11 +36,39 @@ memtrace = []
 memprobe = []
 
 [dependencies]
-# UI: immediate-mode, GPU-composited through wgpu -> DirectX 12.
+# UI: immediate-mode, GPU-composited through wgpu -> Vulkan.
+#
+# Three feature decisions here, and all three are worth 25.6% of the executable
+# together. Every number below came out of a linked binary, not a linker map.
+#
+# **`wgpu_no_default_features`, never `wgpu`.** eframe's own `wgpu` feature is
+# defined as `["wgpu_no_default_features", "egui-wgpu/default"]`, and
+# `egui-wgpu/default` contains `wgpu/default`, which is *every backend wgpu has*.
+# Taking it re-enabled D3D12 and both GL paths on top of the single backend
+# `azur-egui-theme` pins -- which is where the backend decision belongs, and which
+# says so at length in its own manifest. Nothing in a dependency can prevent this;
+# it has to be written here. Measured: **1,059,840 bytes**, against the 78,272 a
+# linker map attributed to the dx12 and gles crates -- 13x, because a map prices the
+# code that is there and only a build shows what *leaves with* a feature (naga's
+# HLSL and GLSL writers, `range-alloc`, gpu-allocator's D3D12 path, and most of the
+# `windows` crate).
+#
+# **No `default_fonts`.** It embedded epaint's four TrueType files -- NotoEmoji
+# 418,804, Ubuntu-Light 361,676, emoji-icon-font 324,132, Hack 309,408 -- as the
+# four largest objects in the binary, and `azur-egui-theme::fonts` installs from
+# `FontDefinitions::empty()`, so not one of them could ever be drawn with. They were
+# 12% of the executable that no code path could reach. Measured: **1,418,240 bytes**,
+# and nothing changes on screen; the theme's own doc predicted this exact regression
+# ("any crate anywhere in a consumer's graph that enables it turns the four back on
+# for everybody, and the cost would reappear silently").
+#
+# **No `glow`.** A second renderer -- `egui_glow`, `glutin`, `glow` -- kept for a
+# machine that has never been reported. Measured: **205,824 bytes**. `AZTM_RENDERER`
+# went with it rather than being left as a name this build can no longer honour, and
+# `memprobe` is wgpu-only; the OpenGL measurements it produced are recorded in the
+# README, which is what they were for.
 eframe = { version = "0.35", default-features = false, features = [
-    "wgpu",
-    "glow",
-    "default_fonts",
+    "wgpu_no_default_features",
 ] }
 egui = { version = "0.35", default-features = false }
 
@@ -97,6 +125,31 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
+
+# **`z` for the code that runs once.** `opt-level = 3` is what makes a table of a
+# thousand live rows feel like one, and none of the three crates below is on the frame
+# path: `naga` parses this program's WGSL, validates the IR and writes SPIR-V exactly
+# once, at pipeline creation, while the window is still hidden; `codespan-reporting`
+# formats a shader error that has never happened; `hexf-parse` reads float literals
+# out of the shader source.
+#
+# Worth **555,008 bytes**, which is a fifth of `naga` -- 1,458,443 of them by linker
+# map, the largest crate in the binary after `core` -- for about 30 seconds of release
+# build time. Verified where the risk is: window-open to first painted frame is
+# unchanged (see below), which is the only thing optimising a startup-only crate for
+# size could have cost.
+[profile.release.package.naga]
+opt-level = "z"
+[profile.release.package.codespan-reporting]
+opt-level = "z"
+[profile.release.package.hexf-parse]
+opt-level = "z"
+
+# Not here, and measured rather than assumed: `image` and `png` decode three icons at
+# startup and nothing afterwards, which looks like exactly the same case as `naga` --
+# and `opt-level = "z"` on both is worth **1,024 bytes**. Their code is monomorphised
+# into the caller's codegen unit, where a per-package profile does not reach it. The
+# same is true of any small generic crate; measure before adding one to this list.
 
 # Iteration profile: release code generation without the two settings that make
 # a one-line change cost two minutes. `lto = "fat"` re-runs cross-crate

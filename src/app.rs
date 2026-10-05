@@ -1495,7 +1495,7 @@ impl eframe::App for App {
     /// its `persistence` feature; this build does its own persistence, so the
     /// write has to hang off shutdown instead. `sync_settings` also flushes on a
     /// two-second delay while running, so a kill still loses at most that.
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn on_exit(&mut self) {
         self.settings.flush();
     }
 }
