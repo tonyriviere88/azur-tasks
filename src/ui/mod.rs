@@ -35,6 +35,15 @@ pub enum Action {
     GoToDetails(ProcKey),
     CopyRow(String),
     Elevate,
+    /// Open Windows' Run dialog. The counterpart to `EndTask`, and the one action
+    /// here that starts a process rather than acting on one already listed.
+    ///
+    /// `at` is the point to centre it under, in *screen pixels*: a native dialog is
+    /// placed in the desktop's coordinates, not this window's, and it is a centre
+    /// because only the code holding the dialog knows how wide it is. `None` leaves
+    /// the placement to Windows. See
+    /// [`screen_anchor_below`](crate::app::screen_anchor_below).
+    NewTask { at: Option<(i32, i32)> },
     /// Switch a startup entry on or off. Carries the entry rather than an index:
     /// actions run after the frame that raised them, by which time the list may
     /// have been re-enumerated under a different order.

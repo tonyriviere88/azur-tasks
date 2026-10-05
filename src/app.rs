@@ -294,17 +294,27 @@ impl App {
             .footer(|ui| {
                 // Right-to-left inside the footer: the action added first lands
                 // furthest right, where the primary button belongs.
-                if ui.add(Button::new(verb).variant(Variant::Danger)).clicked() {
+                let go = ui.add(Button::new(verb).variant(Variant::Danger));
+                if go.clicked() {
                     answer = Some(true);
                 }
-                let cancel = ui.add(Button::new("Cancel").variant(Variant::Subtle));
-                if cancel.clicked() {
+                if ui
+                    .add(Button::new("Cancel").variant(Variant::Subtle))
+                    .clicked()
+                {
                     answer = Some(false);
                 }
-                // Focused, so Enter and a stray double-click both do the
-                // harmless thing.
+                // The dialog opens focused on the button that goes through with it,
+                // so Enter confirms -- egui turns Enter or Space on a focused
+                // clickable widget into a click, and nothing else here has to read
+                // the key. Escape, the ✕ and the scrim are the way out.
+                //
+                // Only when nothing holds focus, which is the frame the dialog
+                // opened: the modal surrenders the focus of whatever was behind it,
+                // and re-requesting every frame would pin it here and stop Tab from
+                // reaching Cancel.
                 if !ui.ctx().memory(|m| m.focused().is_some()) {
-                    cancel.request_focus();
+                    go.request_focus();
                 }
             })
             .show(ctx, |ui| {
@@ -313,9 +323,6 @@ impl App {
                 ui.add(MessageBar::new(risk).intent(Intent::Warning));
             });
 
-        if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
-            answer = Some(false);
-        }
         if !open {
             answer = Some(false);
         }
@@ -679,6 +686,32 @@ impl App {
 
     /// Per-tab controls, laid out left to right.
     fn toolbar_left(&mut self, ui: &mut Ui, snap: &Snapshot, action: &mut Option<Action>) {
+        // Leftmost, and only on the two tabs that list processes: starting one is the
+        // counterpart to ending one and belongs beside it, in the order Task Manager
+        // puts them in. It acts on nothing selected, so unlike End task it is never
+        // disabled.
+        if matches!(self.tab, Tab::Processes | Tab::Details) {
+            // The label cannot say where the program is typed in, and the button next
+            // to it is the one thing in the window that destroys something -- so this
+            // one says plainly that it opens a dialog.
+            let resp = azur::components::tooltip(
+                ui.add(
+                    Button::new("New task")
+                        .variant(Variant::Secondary)
+                        .size(Size::Small),
+                ),
+                "Start a program, through Windows' Run dialog",
+            );
+            if resp.clicked() {
+                // Measured here rather than in the action: the button's rectangle is
+                // a fact of this frame's layout, and by the time the dialog is being
+                // opened there is nothing left to ask.
+                *action = Some(Action::NewTask {
+                    at: screen_anchor_below(ui.ctx(), resp.rect),
+                });
+            }
+        }
+
         match self.tab {
             Tab::Processes => {
                 let sel = self.processes.selected;
@@ -986,6 +1019,7 @@ impl App {
             Action::SetPriority { pid, name, prio } => {
                 actions::set_priority(pid, &name, prio)
             }
+            Action::NewTask { at } => actions::run_new_task(at),
             Action::OpenFileLocation { path } => actions::open_file_location(&path),
             Action::OpenProperties { path } => actions::open_properties(&path),
             Action::GoToDetails(key) => {
@@ -1078,6 +1112,31 @@ impl Speed {
             Self::Paused => 1000,
         }
     }
+}
+
+/// The point a native window should hang centred under `widget` from, in screen
+/// pixels — the coordinates Win32 places a window in, and the ones egui never deals
+/// in.
+///
+/// A *centre* and not a left edge, because centring needs the dialog's width and
+/// nothing here knows it: only the code holding the window can subtract half of it.
+///
+/// One multiplication converts both terms because they are in the same unit: a
+/// widget rectangle is in points from the top-left of the window's content, and the
+/// viewport's `inner_rect` is that content's own position in points — egui-winit
+/// divides the physical rectangle by exactly the `pixels_per_point` used here, so a
+/// display scale or a zoom factor cannot make the two disagree.
+///
+/// `None` before the platform has reported a position, which leaves the placement to
+/// Windows rather than guessing at the origin.
+pub fn screen_anchor_below(ctx: &egui::Context, widget: Rect) -> Option<(i32, i32)> {
+    let content = ctx.input(|i| i.viewport().inner_rect)?;
+    let ppp = ctx.pixels_per_point();
+    // `space-2` of air under the button, which is the gap a menu opens with: the
+    // dialog reads as hanging off the control rather than covering its edge.
+    let x = (content.min.x + widget.center().x) * ppp;
+    let y = (content.min.y + widget.bottom() + space::S2) * ppp;
+    Some((x.round() as i32, y.round() as i32))
 }
 
 /// Add a `label value` pair to the status bar, or nothing at all.

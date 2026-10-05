@@ -297,8 +297,28 @@ Ordering is frozen by *identity*, not row index: processes that appear during a
 freeze are appended rather than displacing what is on screen.
 
 Ending a process asks first, and names what it is about to end — including how
-many processes an "end tree" covers. Cancel holds the keyboard focus, so Enter
-and Escape both do the harmless thing.
+many processes an "end tree" covers. The button that goes through with it holds
+the keyboard focus, so Enter confirms and Escape backs out; the dialog was opened
+by asking for the action, and the way out is the key that means "no".
+
+**New task**, beside End task on the two tabs that list processes, opens Windows'
+own Run dialog — `RunFileDlg`, on a thread of its own so a modal dialog cannot
+freeze this window, and with no owner so it stands free exactly as Win+R gives it.
+
+It opens *centred under the button*, `space-2` below it, which takes three things the
+API does not offer. `RunFileDlg` has no position argument, so the placement goes
+through a `WH_CBT` hook on the dialog's own thread: `HCBT_ACTIVATE` is the moment the
+window exists and is sized but is not yet on screen, so moving it there is a
+placement and not a jump across the desktop. The position has to be in *screen*
+pixels, which egui never deals in — the conversion is one multiplication because a
+widget rectangle and the viewport's `inner_rect` are in the same points, and
+egui-winit divides the physical rectangle by exactly the `pixels_per_point` used to
+multiply it back, so neither a display scale nor a zoom factor can make the two
+disagree. And what the toolbar hands over is the button's *centre*, not a corner:
+`RunFileDlg` sizes its own window, so the only place that knows how wide the dialog
+is — and can subtract half of it — is inside the hook. The result is clamped to the
+work area of the monitor the anchor is on: the button sitting near an edge of a screen
+would otherwise put the dialog's own buttons under the taskbar or past the side.
 
 The Name column takes whatever width the others leave, so collapsing the rail or
 hiding a column widens it rather than leaving a dead strip on the right. Dragging
