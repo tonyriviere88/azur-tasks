@@ -225,6 +225,13 @@ pub struct ProcessesTab {
     sys_rank: [u32; SysRow::COUNT],
     /// True while the sort order is held still (Ctrl held down).
     frozen: bool,
+    /// Set by [`Self::reveal`]; turned into a scroll on the next rebuild, because
+    /// until then there is no row order to scroll to.
+    ///
+    /// A flag and not a key: `reveal` also *selects* the process it is revealing, so
+    /// the rebuild's own hunt for `selected_row` is the lookup a key here would
+    /// repeat.
+    pending_reveal: bool,
 
     // Cache invalidation.
     built_generation: u64,
@@ -276,6 +283,7 @@ impl ProcessesTab {
             rank: rustc_hash::FxHashMap::default(),
             sys_rank: [u32::MAX; SysRow::COUNT],
             frozen: false,
+            pending_reveal: false,
             built_generation: u64::MAX,
             built_filter: String::new(),
             dirty: true,
@@ -299,6 +307,38 @@ impl ProcessesTab {
     pub fn clear_selection(&mut self) {
         self.selected = None;
         self.selected_row = None;
+    }
+
+    /// Select a process, open whatever is folded over it, and scroll it into view.
+    ///
+    /// Used by the Summary tab's rankings, and unlike the Details tab's `reveal` it
+    /// has folds to undo: this list is a tree that opens collapsed. Two of them, and
+    /// both have to give -- the section the process is filed under, and every parent
+    /// between it and the row that heads its group. Without that the row is not in
+    /// the display list at all, and the jump would look like nothing happened.
+    pub fn reveal(&mut self, snap: &Snapshot, key: ProcKey) {
+        self.selected = Some(key);
+        self.pending_reveal = true;
+        self.dirty = true;
+
+        let Some(mut i) = snap.find_by_key(key) else {
+            return;
+        };
+        self.collapsed_groups.remove(&snap.procs[i].group);
+        // `group_head` is where the chain stops: that row is emitted at the top
+        // level of its section, so nothing above it is folded over it. The guard is
+        // for a parent cycle the sampler could not have produced but this walk would
+        // never leave.
+        let mut guard = 0;
+        while !snap.procs[i].group_head && guard <= snap.procs.len() {
+            let parent = snap.procs[i].parent;
+            if parent == u32::MAX {
+                break;
+            }
+            i = parent as usize;
+            self.expanded.insert(snap.procs[i].key());
+            guard += 1;
+        }
     }
 
     /// Whether the list is split into Apps / Background processes.
@@ -456,6 +496,15 @@ impl ProcessesTab {
                 _ => false,
             })
         });
+
+        // A reveal selects the row it is revealing, so the search above has already
+        // found it -- there is nothing here to look up, only the scroll to ask for.
+        // Taken whether or not it resolved: a process that exited between the click
+        // and this rebuild is not going to turn up in a later one either, and
+        // `selected_row` is then `None`, which asks for no scroll.
+        if std::mem::take(&mut self.pending_reveal) {
+            self.table.scroll_to_row = self.selected_row;
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

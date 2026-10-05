@@ -1,4 +1,4 @@
-//! Number formatting for table cells and stat readouts.
+//! Number and text formatting for table cells and stat readouts.
 //!
 //! These are called for every visible cell, so they write into a caller-owned
 //! buffer instead of allocating. egui caches text layout by string content, so
@@ -176,4 +176,42 @@ pub fn elide(s: &str, max_chars: usize) -> std::borrow::Cow<'_, str> {
     let mut out: String = s.chars().take(max_chars.saturating_sub(1)).collect();
     out.push('…');
     std::borrow::Cow::Owned(out)
+}
+
+/// Shorten `s` with a trailing ellipsis until it fits `max_w` pixels.
+///
+/// [`elide`]'s sibling: the same job measured in pixels rather than in characters,
+/// for the places that know how much room they have and not how many characters
+/// fit in it — a card's label, a statistics row, a device name in a 62px cell.
+///
+/// Binary search over the character count, so a long device name costs a handful
+/// of measurements rather than one per character. The measurements go through
+/// egui's layout cache, so a name that did not change between frames is a hash
+/// lookup.
+pub fn elide_to_width(ui: &egui::Ui, s: &str, font: &egui::FontId, max_w: f32) -> String {
+    let measure = |text: &str| -> f32 {
+        ui.painter()
+            .layout_no_wrap(text.to_owned(), font.clone(), egui::Color32::WHITE)
+            .size()
+            .x
+    };
+
+    if measure(s) <= max_w {
+        return s.to_owned();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let (mut lo, mut hi) = (0usize, chars.len());
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        let mut cand: String = chars[..mid].iter().collect();
+        cand.push('…');
+        if measure(&cand) <= max_w {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    let mut out: String = chars[..lo].iter().collect();
+    out.push('…');
+    out
 }

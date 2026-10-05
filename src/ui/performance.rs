@@ -199,14 +199,14 @@ impl PerfTab {
                         p.text(
                             Pos2::new(tx, r.top() + 17.0),
                             Align2::LEFT_CENTER,
-                            elide_to_width(ui, title, &t.fonts.body_strong, avail),
+                            fmt::elide_to_width(ui, title, &t.fonts.body_strong, avail),
                             t.fonts.body_strong.clone(),
                             t.text.primary,
                         );
                         p.text(
                             Pos2::new(tx, r.top() + 38.0),
                             Align2::LEFT_CENTER,
-                            elide_to_width(ui, sub, &t.fonts.caption, avail),
+                            fmt::elide_to_width(ui, sub, &t.fonts.caption, avail),
                             t.fonts.caption.clone(),
                             t.text.secondary,
                         );
@@ -840,7 +840,7 @@ fn stat_column(ui: &Ui, t: &Theme, origin: Pos2, width: f32, rows: &[(&str, &str
         p.text(
             Pos2::new(origin.x, y),
             Align2::LEFT_TOP,
-            elide_to_width(ui, label, &t.fonts.caption, room),
+            fmt::elide_to_width(ui, label, &t.fonts.caption, room),
             t.fonts.caption.clone(),
             t.text.secondary,
         );
@@ -884,38 +884,6 @@ fn legend_dot(ui: &Ui, t: &Theme, pos: Pos2, color: Color32, label: &str) {
 /// just reborrows it.
 fn leak_label(s: &std::sync::Arc<str>) -> &str {
     s
-}
-
-/// Shorten `s` with a trailing ellipsis until it fits `max_w` pixels.
-///
-/// Binary search over the character count, so a long device name costs a handful
-/// of measurements rather than one per character.
-fn elide_to_width(ui: &Ui, s: &str, font: &egui::FontId, max_w: f32) -> String {
-    let measure = |text: &str| -> f32 {
-        ui.painter()
-            .layout_no_wrap(text.to_owned(), font.clone(), Color32::WHITE)
-            .size()
-            .x
-    };
-
-    if measure(s) <= max_w {
-        return s.to_owned();
-    }
-    let chars: Vec<char> = s.chars().collect();
-    let (mut lo, mut hi) = (0usize, chars.len());
-    while lo < hi {
-        let mid = lo + (hi - lo).div_ceil(2);
-        let mut cand: String = chars[..mid].iter().collect();
-        cand.push('…');
-        if measure(&cand) <= max_w {
-            lo = mid;
-        } else {
-            hi = mid - 1;
-        }
-    }
-    let mut out: String = chars[..lo].iter().collect();
-    out.push('…');
-    out
 }
 
 #[cfg(test)]

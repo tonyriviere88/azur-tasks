@@ -7,7 +7,7 @@ use crate::ui::icons::{self, Glyph, IconCache};
 use crate::ui::theme::{self, Theme};
 use crate::ui::app_mark::AppMark;
 use crate::ui::{
-    details, fmt, inspector, performance, processes, sensors, services, startup, Action,
+    details, fmt, inspector, performance, processes, sensors, services, startup, summary, Action,
 };
 
 use azur_egui_theme as azur;
@@ -44,6 +44,7 @@ const STATUS_H: f32 = row::TIGHT;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
+    Summary,
     Processes,
     Performance,
     Sensors,
@@ -53,7 +54,8 @@ pub enum Tab {
 }
 
 impl Tab {
-    const ALL: [Tab; 6] = [
+    const ALL: [Tab; 7] = [
+        Tab::Summary,
         Tab::Processes,
         Tab::Performance,
         Tab::Sensors,
@@ -64,6 +66,7 @@ impl Tab {
 
     fn label(self) -> &'static str {
         match self {
+            Self::Summary => "Summary",
             Self::Processes => "Processes",
             Self::Performance => "Performance",
             Self::Sensors => "Sensors",
@@ -76,6 +79,7 @@ impl Tab {
     /// The rail glyph, as an icon a component can take.
     fn icon(self) -> azur::icons::Icon<'static> {
         match self {
+            Self::Summary => &icons::icon::summary,
             Self::Processes => &icons::icon::processes,
             Self::Performance => &icons::icon::performance,
             Self::Sensors => &icons::icon::gauge,
@@ -87,21 +91,21 @@ impl Tab {
 
     /// Tabs whose content is filtered by the search box.
     fn searchable(self) -> bool {
-        !matches!(self, Self::Performance | Self::Sensors)
+        !matches!(self, Self::Summary | Self::Performance | Self::Sensors)
     }
 
     /// Whether this tab's content is a table that runs to the window's edges.
     ///
     /// A table paints its own panel and is welded to the strips above and below it
-    /// by seams, so the central panel gives it no margin at all. The two card tabs
-    /// want the opposite: cards float on the canvas, and the canvas has to be
+    /// by seams, so the central panel gives it no margin at all. The three card
+    /// tabs want the opposite: cards float on the canvas, and the canvas has to be
     /// visible around them.
     ///
     /// The same tabs as [`Self::searchable`] today, and a different question -- one
     /// is about what a filter would narrow, the other about what the content is
     /// shaped like. A tab could answer them differently.
     fn tabular(self) -> bool {
-        !matches!(self, Self::Performance | Self::Sensors)
+        !matches!(self, Self::Summary | Self::Performance | Self::Sensors)
     }
 }
 
@@ -138,6 +142,7 @@ pub struct App {
     filter_focused: bool,
     elevated: bool,
 
+    summary: summary::SummaryTab,
     processes: processes::ProcessesTab,
     details: details::DetailsTab,
     perf: performance::PerfTab,
@@ -212,10 +217,14 @@ impl App {
             theme: Theme::dark(),
             icons: IconCache::new(),
             mark: AppMark::default(),
-            tab: Tab::Processes,
+            // The window opens on the summary: it is the page that says whether
+            // anything needs looking at, and every part of it is a way into the tab
+            // that would answer the next question.
+            tab: Tab::Summary,
             filter: String::new(),
             filter_focused: false,
             elevated: actions::is_elevated(),
+            summary: summary::SummaryTab::new(),
             processes,
             details,
             perf: performance::PerfTab::new(),
@@ -665,7 +674,9 @@ impl App {
             Tab::Details => self.details.clear_selection(),
             Tab::Services => self.services.clear_selection(),
             Tab::Startup => self.startup.clear_selection(),
-            Tab::Performance | Tab::Sensors => {}
+            // Nothing on any of the three holds a selection: two are read-outs, and
+            // the summary's rankings are a ranking rather than a list to pick from.
+            Tab::Summary | Tab::Performance | Tab::Sensors => {}
         }
     }
 
@@ -834,8 +845,9 @@ impl App {
                 );
                 ui.add(Badge::new(format!("{total} total")).small(true));
             }
-            // Nothing to act on: both are read-outs.
-            Tab::Performance | Tab::Sensors => {}
+            // Nothing to act on: all three are read-outs, and the summary's own
+            // rows carry the process menu themselves.
+            Tab::Summary | Tab::Performance | Tab::Sensors => {}
         }
     }
 
@@ -1053,6 +1065,17 @@ impl App {
                 self.details.reveal(key);
                 // Jumping to a filtered-out row would look like nothing happened.
                 self.filter.clear();
+                Ok(String::new())
+            }
+            Action::GoToProcess(key) => {
+                self.tab = Tab::Processes;
+                self.processes.reveal(snap, key);
+                self.filter.clear();
+                Ok(String::new())
+            }
+            Action::ShowResource(res) => {
+                self.tab = Tab::Performance;
+                self.perf.selected = res;
                 Ok(String::new())
             }
             Action::CopyRow(text) => {
@@ -1441,6 +1464,14 @@ impl eframe::App for App {
                     );
                 }
                 match self.tab {
+                Tab::Summary => self.summary.ui(
+                    ui,
+                    &theme,
+                    snap,
+                    &self.mon.meta,
+                    &mut self.icons,
+                    &mut action,
+                ),
                 Tab::Processes => self.processes.ui(
                     ui,
                     &theme,

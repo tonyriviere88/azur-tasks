@@ -146,7 +146,11 @@ impl<'a> Graph<'a> {
 }
 
 /// The translucent band under a series line.
-fn fill_of(c: Color32) -> Color32 {
+///
+/// Shared, because it is what a wash of a resource's colour looks like in this
+/// window: the Summary tab's ranking bars are the same series colour at the same
+/// strength, so a card and the graph above it read as one system.
+pub fn fill_of(c: Color32) -> Color32 {
     Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 56)
 }
 

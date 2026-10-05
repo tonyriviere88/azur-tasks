@@ -137,6 +137,8 @@ impl IconCache {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Glyph {
+    /// Four tiles, one of them filled: a page of readings.
+    Summary,
     Processes,
     Performance,
     Details,
@@ -164,6 +166,9 @@ pub mod icon {
     use super::{draw, Glyph};
     use egui::{Color32, Painter, Rect};
 
+    pub fn summary(p: &Painter, rect: Rect, color: Color32) {
+        draw(p, rect, Glyph::Summary, color);
+    }
     pub fn processes(p: &Painter, rect: Rect, color: Color32) {
         draw(p, rect, Glyph::Processes, color);
     }
@@ -206,6 +211,33 @@ pub fn draw(painter: &Painter, rect: Rect, g: Glyph, color: Color32) {
     let stroke = Stroke::new(1.5, color);
 
     match g {
+        // Four tiles in a square, the first of them filled: a page of readings, of
+        // which one is the one you came for. Distinct at 16px from `Processes`
+        // (three bars, all alike) and from `Details` (one framed grid).
+        Glyph::Summary => {
+            let r = Rect::from_center_size(c, Vec2::splat(s * 1.72));
+            let gap = s * 0.26;
+            let tile = (r.width() - gap) * 0.5;
+            for (i, (dx, dy)) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)]
+                .into_iter()
+                .enumerate()
+            {
+                let t = Rect::from_min_size(
+                    Pos2::new(r.left() + dx * (tile + gap), r.top() + dy * (tile + gap)),
+                    Vec2::splat(tile),
+                );
+                if i == 0 {
+                    painter.rect_filled(t, egui::CornerRadius::same(1), color);
+                } else {
+                    painter.rect_stroke(
+                        t,
+                        egui::CornerRadius::same(1),
+                        Stroke::new(1.2, color),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+            }
+        }
         // Three stacked bars: a list of processes.
         Glyph::Processes => {
             for i in 0..3 {

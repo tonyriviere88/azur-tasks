@@ -2,9 +2,9 @@
 
 # Azur Task Manager
 
-A Windows task manager built for low latency and a small footprint: process
-hierarchy, a full details grid, live performance graphs, services and startup
-entries. GPU-composited, event-driven, and named for the design system it is
+A Windows task manager built for low latency and a small footprint: a summary
+page, process hierarchy, a full details grid, live performance graphs, sensors,
+services and startup entries. GPU-composited, event-driven, and named for the design system it is
 built out of — Azur (`azur-egui-theme`, a sibling checkout) down to the title
 bar, the icon and the colour behind a busy cell.
 
@@ -141,6 +141,58 @@ recycles PIDs aggressively; without the creation time, selection, expansion
 state and rate deltas would silently jump to an unrelated process.
 
 ## Tabs
+
+**Summary** — the whole machine on one screen, and where the window opens. A band
+of cards along the top, one per resource: CPU, memory, the disks, the network, and
+one card per graphics adapter, each showing the headline figure, the last minute of
+it, and the line of detail the Performance tab keeps in its statistics column. The
+CPU card carries the package temperature and power beside its clock, and a GPU card
+its own temperature — the Sensors tab's readings, on the card of the part they
+belong to rather than as a second wall of cards, and absent rather than zero on
+hardware that has no such sensor.
+
+Under them, three rankings side by side: the processes using the most CPU, the most
+memory and the most disk. They count *subtree totals over the rows that head their
+own entry* — exactly what a folded row shows on the Processes tab, and the same
+partition of the machine, so every process is inside exactly one of them and
+counted once. "Google Chrome, 24%" is the answer a reader wants; forty renderers at
+0.6% each is the same fact arranged so nothing can be read off it. The page says so
+next to the heading, because otherwise a browser at 24% reads as one tab gone
+wrong.
+
+Each row carries a bar as wide as its value against the leader — in that
+resource's own series colour and the same wash the fill under its trace is drawn
+with, so the two halves of the page agree about what a resource looks like. The
+scale never drops below what it takes for a reading to be worth noticing: against
+the leader alone, an idle machine's busiest process at three tenths of a percent
+would draw a full-width bar and read as a machine under load.
+
+Two things this page deliberately does *not* do:
+
+- **It measures nothing of its own.** Every figure is one another tab already
+  shows. A summary that took its own readings would eventually disagree with the
+  page it is summarising.
+- **It is not a dead end.** A resource card opens that resource on Performance —
+  the aggregate disk and network cards land on the busiest device, and the card's
+  tooltip names which one that is. A ranking row opens that process on Processes,
+  with its section and every parent above it unfolded and the row scrolled to;
+  right-clicking one gives the same menu the Processes tab's own rows carry.
+
+The disk and network cards are the only place anything here is added up across
+devices, and what they add up is a *rate* — bytes and bits per second. Two disks at
+50% active are not one disk at 100%, a machine with three adapters has no single
+"network utilization", and a percentage that could exceed 100 reads as a bug. The
+saturation each device does have goes in the detail line, where it belongs to one
+device and means something.
+
+The page fits the window rather than scrolling: the rankings grow to as many rows
+as the height allows, and whatever they do not need goes to the traces, because
+height is worth something to a graph and nothing to a 24px row. Three rankings
+side by side or one at a time and nothing in between — two of them beside a third
+on its own row is neither arrangement — and the resource band wraps *balanced*, so
+six cards in a window with room for five is three and three rather than five and a
+spare. On a window too small for any of that it scrolls, which is the only time it
+does.
 
 **Processes** — hierarchy in three sections: Apps, Background processes, and
 Suspended processes. A whole process tree is assigned to one section, so a browser's
@@ -705,6 +757,7 @@ src/
   ui/
     table.rs          virtualized direct-painting table
     graph.rs          filled line graphs, sparklines, segmented bars
+    summary.rs        the machine on one page: resource cards and three rankings
     processes.rs details.rs performance.rs sensors.rs services.rs startup.rs
     theme.rs          the app's slice of the Azur theme: series colours, thresholds
     app_mark.rs       the product mark in the title bar, as a texture

@@ -12,6 +12,7 @@ pub mod processes;
 pub mod sensors;
 pub mod services;
 pub mod startup;
+pub mod summary;
 pub mod table;
 pub mod theme;
 
@@ -33,6 +34,17 @@ pub enum Action {
     OpenFileLocation { path: String },
     OpenProperties { path: String },
     GoToDetails(ProcKey),
+    /// Show a process on the Processes tab, folds opened and scrolled to.
+    ///
+    /// The Summary tab's counterpart to `GoToDetails`: its rankings are the
+    /// Processes tab's own rows, aggregated the same way, so that is the list a
+    /// reader is asking to be taken to -- not the flat grid of 33 columns.
+    GoToProcess(ProcKey),
+    /// Show one resource on the Performance tab.
+    ///
+    /// What makes the Summary tab's cards a way *into* the page they summarise
+    /// rather than a copy of it.
+    ShowResource(performance::Resource),
     CopyRow(String),
     Elevate,
     /// Open Windows' Run dialog. The counterpart to `EndTask`, and the one action
