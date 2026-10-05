@@ -154,8 +154,9 @@ give up space gracefully.
 
 # Install
 
-Azur Tasks is built from source. You need Rust, the MSVC toolchain and a Windows SDK, and the
-[`azur-egui-theme`](../azur-egui-theme) repository checked out next to this one.
+Azur Tasks is built from source. You need Rust, the MSVC toolchain and a Windows SDK; cargo
+fetches the [`azur-egui-theme`](https://github.com/tonyriviere88/azur-egui-theme) dependency
+itself.
 
 ```powershell
 cargo build --release

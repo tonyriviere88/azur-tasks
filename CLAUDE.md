@@ -5,8 +5,8 @@ reasoning behind most of it is in the `//!` module headers and the comments in
 `Cargo.toml` and `.cargo/config.toml`. Read the header of a module before changing it.
 
 `azur-tasks` ("Azur Tasks") — a Windows task manager in Rust on egui 0.35, ~24k lines across
-~49 files in `src/`. Windows-only. Sibling path dependency: `../azur-egui-theme`, the shared
-Azur design system (title bar, tokens, components, renderer configuration, `deploy`).
+~49 files in `src/`. Windows-only. Git dependency (pinned by `Cargo.lock`):
+`azur-egui-theme`, the shared Azur design system (title bar, tokens, components, renderer configuration, `deploy`).
 The product name lives in one constant, `PRODUCT_NAME` in [main.rs](src/main.rs); `build.rs`
 repeats it for the version resource.
 
@@ -204,7 +204,7 @@ Each looks like a bug or an oversight and is a measured or deliberate decision:
 
 ## Theme and design system
 
-The window is `../azur-egui-theme` throughout, down to the `TitleBar` (the window is created
+The window is `azur-egui-theme` throughout, down to the `TitleBar` (the window is created
 with `with_decorations(false)`). Its egui must stay in lockstep with this crate's: two egui
 versions are two `Context` types.
 

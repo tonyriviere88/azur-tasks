@@ -75,7 +75,14 @@ egui = { version = "0.35", default-features = false }
 # Palette, semantic roles and egui styling. Its egui must stay in lockstep with
 # the one above: two egui versions in the graph would be two `Context` types,
 # and the theme would style neither.
-azur-egui-theme = { path = "../azur-egui-theme" }
+#
+# A git dependency, not `../azur-egui-theme`: CI checks out this repository alone. `Cargo.lock`
+# pins the commit; `cargo update -p azur-egui-theme` moves it. To build against a local checkout,
+# patch it in from an uncommitted config rather than here:
+#
+#   [patch."https://github.com/tonyriviere88/azur-egui-theme.git"]
+#   azur-egui-theme = { path = "../azur-egui-theme" }
+azur-egui-theme = { git = "https://github.com/tonyriviere88/azur-egui-theme.git" }
 
 # Lock-free snapshot handoff from the sampler thread to the UI thread.
 arc-swap = "1.9"

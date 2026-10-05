@@ -1,0 +1,43 @@
+name: Release
+
+# Push a tag such as `v1.0.0` and this builds the release executable and attaches it to the
+# GitHub release of that name, creating the release if it does not exist yet.
+on:
+  push:
+    tags: [ "v*" ]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and publish, e.g. v1.0.0"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ inputs.tag || github.ref }}
+
+    - name: Build
+      run: cargo build --release --locked
+
+    - name: Publish
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        TAG: ${{ inputs.tag || github.ref_name }}
+      run: |
+        exe=target/release/azur-tasks.exe
+        if gh release view "$TAG" > /dev/null 2>&1; then
+          gh release upload "$TAG" "$exe" --clobber
+        else
+          gh release create "$TAG" "$exe" --title "Azur Tasks ${TAG#v}" --generate-notes
+        fi
