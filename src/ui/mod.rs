@@ -1,21 +1,11 @@
 //! Presentation layer.
 
+pub mod app_mark;
 pub mod details;
 pub mod fmt;
 pub mod graph;
 pub mod icons;
 pub mod inspector;
-
-/// The application marks, **copied verbatim** from the design system's
-/// `app-icons/marks.rs`.
-///
-/// It is a copy on purpose rather than a module of `azur-egui-theme`: the marks are
-/// the design source for four separate applications and belong beside the artwork
-/// they generate, not in the theme's public API. Because it is byte-identical, a
-/// refresh is a copy and a check is a `diff` — which is also why nothing here edits
-/// it, including to silence the three marks this application does not use.
-#[allow(dead_code)]
-pub mod marks;
 
 pub mod performance;
 pub mod processes;

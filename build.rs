@@ -38,7 +38,7 @@ struct Image {
     bpp: u16,
     /// A whole PNG file, or a DIB (BITMAPINFOHEADER + pixels + mask). Copied into
     /// the resource either way: Windows has read PNG icon entries since Vista, and
-    /// the design system ships all nine of them that way.
+    /// all nine entries in this application's `.ico` are stored that way.
     data: Vec<u8>,
 }
 

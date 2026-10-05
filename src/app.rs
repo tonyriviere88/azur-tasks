@@ -5,8 +5,9 @@ use crate::sys::sampler::{self, Monitor};
 use crate::sys::snapshot::Snapshot;
 use crate::ui::icons::{self, Glyph, IconCache};
 use crate::ui::theme::{self, Theme};
+use crate::ui::app_mark::AppMark;
 use crate::ui::{
-    details, fmt, inspector, marks, performance, processes, sensors, services, startup, Action,
+    details, fmt, inspector, performance, processes, sensors, services, startup, Action,
 };
 
 use azur_egui_theme as azur;
@@ -126,6 +127,9 @@ pub struct App {
     mon: Monitor,
     theme: Theme,
     icons: IconCache,
+    /// The product mark in the title bar. Not part of `icons`, which caches one
+    /// texture per executable path: this is a single image with no key.
+    mark: AppMark,
     tab: Tab,
     filter: String,
     elevated: bool,
@@ -203,6 +207,7 @@ impl App {
             mon,
             theme: Theme::dark(),
             icons: IconCache::new(),
+            mark: AppMark::default(),
             tab: Tab::Processes,
             filter: String::new(),
             elevated: actions::is_elevated(),
@@ -1181,6 +1186,11 @@ impl eframe::App for App {
         //
         // The platform's caption is off (see `main`), so the title bar is Azur's:
         // 32px of `background-layer` with the window buttons at the end.
+        //
+        // The mark is resolved before the panel, not inside it: uploading a texture
+        // needs the context, and the closure below already holds the borrow of `self`
+        // the window buttons write through.
+        let mark = self.mark.icon(&ctx);
         egui::Panel::top("title")
             .exact_size(row::TITLE_BAR)
             .resizable(false)
@@ -1188,10 +1198,10 @@ impl eframe::App for App {
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
                 match TitleBar::new("Azur Task Manager")
-                    // The product mark, not a nav glyph — and the same geometry the
-                    // taskbar button and the `.exe` in Explorer are rasterised from,
-                    // because both come out of the design system's `marks.rs`.
-                    .icon(&marks::task_manager)
+                    // The product mark, not a nav glyph — and the same artwork the
+                    // taskbar button and the `.exe` in Explorer wear, reduced to the
+                    // size this box is in pixels rather than redrawn for it.
+                    .icon(&mark)
                     .maximized(self.maximized)
                     .show(ui)
                 {

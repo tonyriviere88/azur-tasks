@@ -15,18 +15,19 @@ mod ui;
 #[global_allocator]
 static ALLOC: memtrace::Counting = memtrace::Counting;
 
-/// The window icon, from the design system's mark for this application.
+/// The window icon: this application's mark, from `assets/app-source.png`.
 ///
 /// The `.ico` in the executable's resources is what Explorer and a pinned shortcut
 /// read, but winit registers its window class with a null `hIcon`, so the taskbar
 /// button and Alt-Tab entry of a *running* window have to be handed pixels. Miss
 /// this and they switch to egui's white `e` the moment the window opens.
 ///
-/// 64px of the nine the design system generates: winit makes one `HICON` at the
-/// source resolution and lets Windows scale it, and 64 halves exactly to the 32
-/// the taskbar asks for and quarters exactly to the 16 in the caption. The mark has
-/// pixel-level detail at those sizes — a rule one pixel thick under the columns —
-/// so an exact reduction is worth more here than a larger source would be.
+/// 64px of the nine sizes in the `.ico`: winit makes one `HICON` at the source
+/// resolution and lets Windows scale it, and 64 halves exactly to the 32 the taskbar
+/// asks for and quarters exactly to the 16 in the caption. Both of those steps are a
+/// clean box reduction of an image with fine detail in it — the trace across the
+/// window, and the gear's ring — so an exact factor is worth more here than a larger
+/// source would be. `ui::app_mark` reads the same file for the title bar.
 const WINDOW_ICON: &[u8] = include_bytes!("../assets/app-64.png");
 
 /// The graphics configuration, which this program no longer decides.
