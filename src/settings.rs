@@ -61,6 +61,16 @@ impl Settings {
         self.values.get(key)?.parse().ok()
     }
 
+    /// A stored string, as it was written.
+    ///
+    /// `None` when the key was never written, which is not the same as an empty
+    /// value: a caller that stores a *choice* needs to tell "no choice yet" -- where
+    /// the default still has to keep up with the machine -- from a choice the reader
+    /// actually made.
+    pub fn text(&self, key: &str) -> Option<&str> {
+        self.values.get(key).map(String::as_str)
+    }
+
     pub fn bool(&self, key: &str, default: bool) -> bool {
         match self.values.get(key).map(String::as_str) {
             Some("1" | "true") => true,

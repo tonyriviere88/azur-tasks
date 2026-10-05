@@ -44,6 +44,10 @@ const CARD: Vec2 = Vec2::new(208.0, 96.0);
 /// What a card reads when the machine has no such sensor. An em dash, not a zero:
 /// the difference between "nothing to report" and "reported nothing".
 const MISSING: &str = "—";
+/// The key of the foreground-frames section, for [`SensorsTab::reveal`]. Named here
+/// because this is where that section is built, and read by the Summary tab's FPS
+/// card, which is a way into it.
+pub const FRAMES: &str = "frames";
 /// The gap between cards, and between a section and the next.
 const GAP: f32 = space::S3;
 /// The heading row, which is also the handle a section is dragged by.
@@ -52,6 +56,13 @@ const HEAD_H: f32 = 24.0;
 pub struct SensorsTab {
     /// Scroll offset, kept so switching tabs does not jump back to the top.
     scroll: f32,
+    /// A section to bring into view the next time the page is laid out, from
+    /// [`SensorsTab::reveal`].
+    reveal: Option<&'static str>,
+    /// The offset that reveal worked out, waiting to be applied. It cannot be
+    /// written into `scroll` where it is found: the scroll area reports the offset
+    /// the page was *drawn* at once the page has run, which would overwrite it.
+    pending: Option<f32>,
     pub layout: Layout,
     /// What is under the pointer mid-drag, if anything.
     drag: Option<Drag>,
@@ -81,9 +92,22 @@ impl SensorsTab {
     pub fn new() -> Self {
         Self {
             scroll: 0.0,
+            reveal: None,
+            pending: None,
             layout: Layout::default(),
             drag: None,
         }
+    }
+
+    /// Scroll a named section to the top of the view, next time the page is painted.
+    ///
+    /// Deferred rather than done here, because where a section *is* depends on how
+    /// the reader has arranged the page and on what the machine has — which is known
+    /// only while the page is being laid out. A key this page is not showing, because
+    /// it was switched off or because the machine has nothing to put in it, leaves the
+    /// page where it was rather than guessing.
+    pub fn reveal(&mut self, section: &'static str) {
+        self.reveal = Some(section);
     }
 
     pub fn ui(&mut self, ui: &mut Ui, t: &Theme, snap: &Snapshot) {
@@ -102,10 +126,27 @@ impl SensorsTab {
                 azur_egui_theme::scrollbar(ui, t);
                 self.page(ui, t, snap);
             });
-        self.scroll = out.state.offset.y;
+        // The scroll area reports the offset the page was *drawn* at, which is the
+        // answer on every frame but the one where a `reveal` has just worked out a
+        // different one.
+        match self.pending.take() {
+            Some(y) => {
+                self.scroll = y;
+                // Nothing else would ask for the frame that applies it: this window
+                // paints on new data or on input, and the click that asked for the
+                // reveal has already been dealt with.
+                ui.ctx().request_repaint();
+            }
+            None => self.scroll = out.state.offset.y,
+        }
     }
 
     fn page(&mut self, ui: &mut Ui, t: &Theme, snap: &Snapshot) {
+        // Where the page's content begins, which is what a scroll offset is measured
+        // from: the scroll area puts the content at the top of the view less the
+        // offset, so a section's distance from here *is* the offset that would bring
+        // it to the top. Taken before anything is laid out.
+        let origin = ui.cursor().top();
         let mut sects = build(snap, t);
         self.layout.arrange(&mut sects);
 
@@ -122,6 +163,13 @@ impl SensorsTab {
 
         for sect in sects.iter().filter(|s| s.shown) {
             let top = ui.cursor().top();
+
+            // A `reveal` landing on this section, answerable now that its position is
+            // known.
+            if self.reveal.is_some_and(|k| k == sect.key) {
+                self.reveal = None;
+                self.pending = Some(top - origin);
+            }
 
             // --- heading, which is also the section's drag handle -------------
             ui.add_space(GAP);
@@ -864,7 +912,7 @@ fn build<'a>(snap: &'a Snapshot, t: &Theme) -> Vec<Sect<'a>> {
     } else {
         format!("Foreground — {}", f.name)
     };
-    let mut fg = Builder::new("frames", title);
+    let mut fg = Builder::new(FRAMES, title);
     let stats = f.stats;
     fg.card(
         "fps",

@@ -127,9 +127,11 @@ pub fn enumerate() -> Vec<Service> {
 
 /// The command line a service starts, from its `ImagePath`.
 ///
-/// Not part of [`Service`]: nothing displays it, and it is only wanted for the one
-/// row a context menu is open on. Reading it for all several hundred of them on
-/// every refresh would be work nobody asked for.
+/// Not part of [`Service`], and read on demand: it is wanted for the one row the
+/// pointer or a context menu is on -- the row tooltip and "Open folder" -- and
+/// reading it for all several hundred of them on every refresh would be work nobody
+/// asked for. Once per frame for one service is a registry read the frame will not
+/// notice.
 ///
 /// The registry rather than `QueryServiceConfigW` — the same place, reachable
 /// without opening a handle to the service controller, and readable by a standard

@@ -948,6 +948,37 @@ impl<'a> RowPainter<'a> {
         true
     }
 
+    /// A line for the row tooltip that no column carries.
+    ///
+    /// Painting ignores it -- there is no cell for it to go in -- and the read pass
+    /// [`Table::read_row`] records it, so it appears in the tooltip and in "copy this
+    /// row" and nowhere else. For the fact that explains a row and is the wrong shape
+    /// for a column: an image path, a command line. Both are long enough that a
+    /// column showing them is a column showing the first third of them, which is why
+    /// the tabs that have such a column keep it switched off.
+    ///
+    /// The value arrives as a closure because it is the read pass's business alone:
+    /// painting runs for every visible row on every frame, and one of these costs a
+    /// registry read. It is called once, for the one row under the pointer.
+    ///
+    /// Dropped when a visible column carries the same heading, so a reader who turns
+    /// that column on does not get told twice.
+    pub fn detail(&mut self, label: &'static str, value: impl FnOnce() -> String) {
+        let Some(sink) = self.sink.as_mut() else {
+            return;
+        };
+        if sink.titles.contains(&label) {
+            return;
+        }
+        let value = value();
+        // Nothing rather than an empty line: a path that could not be read is the
+        // ordinary case for a protected process, and a heading with nothing after it
+        // says less than no heading at all.
+        if !value.is_empty() {
+            sink.out.push((label, value));
+        }
+    }
+
     /// Draw a cell's text, clipped to the column and aligned.
     pub fn text(&mut self, slot: usize, s: &str, color: Color32, align: Align) {
         self.text_font(slot, s, color, align, &self.theme.fonts.body.clone());
@@ -1256,6 +1287,83 @@ mod tests {
                 ("PID", "4 812".to_owned()),
             ]
         );
+    }
+
+    /// A detail is a tooltip line no *visible* column carries: the read pass
+    /// collects it, the paint pass costs nothing for it, and a visible column with
+    /// the same heading wins -- which is what stops the Details tab printing its
+    /// command line twice when the reader turns that column on.
+    ///
+    /// A *hidden* column of the same name does not suppress it, and that is the
+    /// point of the whole thing: the tooltip is then the only place the row can say
+    /// where its program lives, which is why those columns are off by default.
+    #[test]
+    fn collects_the_details_no_visible_column_carries() {
+        let t = Theme::dark();
+        let table = table();
+        let mut collected = Vec::new();
+        let mut built_dropped = 0usize;
+        egui::__run_test_ui(|ui| {
+            let painter = ui.painter().with_clip_rect(Rect::NOTHING);
+            collected = table.read_row(&painter, &t, 0, &mut |rp| {
+                rp.text(0, "svchost.exe", t.text.primary, Align::Left);
+                rp.detail("Image path", || {
+                    r"C:\Windows\System32\svchost.exe".to_owned()
+                });
+                // "Status" is on show, so the row has a cell for this already.
+                rp.detail("Status", || {
+                    built_dropped += 1;
+                    "Running".to_owned()
+                });
+                // "Command" is a column of this table too, but a hidden one, so the
+                // tooltip is the only place the row can say it.
+                rp.detail("Command", || "svchost.exe -k netsvcs".to_owned());
+                // Nothing to say -- a protected process whose path could not be
+                // read. A heading with nothing after it says less than no heading.
+                rp.detail("User name", String::new);
+            });
+        });
+        assert_eq!(
+            collected,
+            vec![
+                ("Name", "svchost.exe".to_owned()),
+                ("Image path", r"C:\Windows\System32\svchost.exe".to_owned()),
+                ("Command", "svchost.exe -k netsvcs".to_owned()),
+            ]
+        );
+        assert_eq!(
+            built_dropped, 0,
+            "a line a visible column carries is dropped without being built"
+        );
+    }
+
+    /// And painting asks for none of them: the closure is the read pass's business,
+    /// and one of these costs a registry read on every visible row of every frame.
+    #[test]
+    fn painting_never_asks_a_detail_for_its_value() {
+        let t = Theme::dark();
+        let table = table();
+        let mut asked = 0usize;
+        egui::__run_test_ui(|ui| {
+            let mut cells = Vec::new();
+            table.layout(ui.max_rect(), &mut cells);
+            let mut rp = RowPainter {
+                row: 0,
+                rect: ui.max_rect(),
+                cells: &cells,
+                painter: &ui.painter().with_clip_rect(Rect::NOTHING),
+                theme: &t,
+                selected: false,
+                hovered: false,
+                baseline: 0.0,
+                sink: None,
+            };
+            rp.detail("Image path", || {
+                asked += 1;
+                "never".to_owned()
+            });
+        });
+        assert_eq!(asked, 0);
     }
 
     /// A cell drawn in two parts — Task Manager writes a name and then a

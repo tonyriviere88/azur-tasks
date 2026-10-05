@@ -114,6 +114,26 @@ impl Status {
     }
 }
 
+impl Status {
+    /// The same fact in a caption's worth of room — the Summary tab's FPS card,
+    /// where [`Self::note`] is a paragraph there is no line for.
+    ///
+    /// Written here beside the long form so the two cannot come to disagree about
+    /// what a state means, and short enough to survive the narrowest card that band
+    /// will lay out.
+    pub fn brief(self) -> &'static str {
+        match self {
+            // Tracing and still no figures is not a failure: nothing in the
+            // foreground is presenting, which is the ordinary state of a desktop.
+            Self::Tracing => "Nothing rendering",
+            Self::NeedsElevation => "Needs administrator",
+            // Without the code, which the note carries: a number here would take the
+            // room that says what it is about.
+            Self::Failed(_) => "No trace session",
+        }
+    }
+}
+
 /// Recent present timestamps for one process, from one provider.
 struct Ring {
     /// QPC ticks, oldest first, at most [`RING`] of them.

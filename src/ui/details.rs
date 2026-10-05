@@ -389,6 +389,11 @@ impl DetailsTab {
                         _ => {}
                     }
                 }
+                // Both of these are columns here, and both are off by default --
+                // 460px of command line is not a column anybody keeps on. `detail`
+                // drops a line a visible column already carries, so turning one on
+                // does not print it twice.
+                super::processes::process_detail(rp, m.as_deref());
             });
 
         // The selection is a process key rather than a row, so a click or an arrow

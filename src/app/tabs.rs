@@ -67,14 +67,32 @@ impl Tab {
 
     /// Whether this tab lists processes.
     ///
-    /// Five things in the shell turn on it: whether Ctrl freezes the row order,
-    /// whether the status bar says so, whether the New task button is there, whether
-    /// the inspector's latch is offered, and whether the inspector panel opens. All
-    /// five used to spell out `matches!(self.tab, Processes | Details)`, which is one
-    /// fact copied five times — a third process-listing tab would have had to find
-    /// every copy, and the copies could disagree without anything complaining.
+    /// Three things in the shell turn on it: whether the New task button is there,
+    /// whether the inspector's latch is offered, and whether the inspector panel
+    /// opens. All three used to spell out `matches!(self.tab, Processes | Details)`,
+    /// which is one fact copied three times — a third process-listing tab would have
+    /// had to find every copy, and the copies could disagree without anything
+    /// complaining.
+    ///
+    /// Holding the row order used to be one of them and is now
+    /// [`Self::holds_order_with_ctrl`]: the Summary tab holds an order without being
+    /// a process list, so the two questions came apart.
     pub(super) fn is_process_list(self) -> bool {
         matches!(self, Self::Processes | Self::Details)
+    }
+
+    /// Whether holding Ctrl pins this tab's rows in the order they are already in.
+    ///
+    /// Every page whose rows are ordered by a live reading and can be clicked: the
+    /// two table tabs, and the Summary tab's rankings. It is what says the row under
+    /// the pointer will still be there when the button goes down, and it is what the
+    /// status bar reports — so it has to be one answer rather than a copy per tab.
+    ///
+    /// The Services and Startup tabs are absent on purpose: their rows are ordered by
+    /// name and by a state that changes when the reader changes it, so they never
+    /// move underneath anybody.
+    pub(super) fn holds_order_with_ctrl(self) -> bool {
+        matches!(self, Self::Summary | Self::Processes | Self::Details)
     }
 
     /// Tabs whose content is filtered by the search box.

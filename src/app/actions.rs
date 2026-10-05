@@ -153,6 +153,14 @@ impl App {
                 self.perf.selected = res;
                 Ok(String::new())
             }
+            Action::ShowFrames => {
+                self.tab = Tab::Sensors;
+                // The section, not the top of the page: the frames come last of the
+                // named sections, and a tab that opened on the CPU's temperature
+                // would look like the click had gone nowhere.
+                self.sensors.reveal(crate::ui::sensors::FRAMES);
+                Ok(String::new())
+            }
             Action::CopyRow(text) => {
                 let n = text.len();
                 self.clipboard = Some(text);

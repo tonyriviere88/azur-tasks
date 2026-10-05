@@ -10,7 +10,7 @@ use crate::ui::{
 };
 
 use azur_egui_theme as azur;
-use azur::components::{NavigationRail, TitleBar, TitleBarAction, Toaster};
+use azur::components::{NavigationRail, TitleBar, TitleBarAction, Toaster, ToasterPosition};
 use azur::tokens::{row, space};
 use egui::{Rect, Ui};
 use std::time::Instant;
@@ -97,6 +97,8 @@ pub struct App {
 
 /// The key the Sensors tab's arrangement is stored under.
 const SENSORS_KEY: &str = "sensors";
+/// And the one the Summary tab's chosen graphics adapter is stored under.
+const SUMMARY_GPU_KEY: &str = "summary.gpu";
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, settings: crate::settings::Settings) -> Self {
@@ -119,6 +121,13 @@ impl App {
         }
         let mut sensors = sensors::SensorsTab::new();
         settings.restore_sensors(SENSORS_KEY, &mut sensors.layout);
+        let mut summary = summary::SummaryTab::new();
+        // Absent means the reader has never chosen, which is not the same as having
+        // chosen nothing: the default has to keep up with what is fitted, so it is
+        // worked out from the snapshot every frame. See `SummaryTab::gpu`.
+        if let Some(name) = settings.text(SUMMARY_GPU_KEY) {
+            summary.gpu = name.to_owned();
+        }
         // Collapsed by default: the rail's icons are captioned by the tab heading
         // beside them, and the width it gives back goes to the table, which is what
         // a reader came for. Expanding is one click and it is remembered.
@@ -138,14 +147,20 @@ impl App {
             filter: String::new(),
             filter_focused: false,
             elevated: crate::sys::actions::is_elevated(),
-            summary: summary::SummaryTab::new(),
+            summary,
             processes,
             details,
             perf: performance::PerfTab::new(),
             sensors,
             services,
             startup,
-            toaster: Toaster::new(),
+            // Bottom right, where a toast reports on what has just happened without
+            // covering what is about to. The top-right corner of this window holds the
+            // sample-rate control and the title bar's own buttons, and a toast landing
+            // there hides them at exactly the moment a reader may want to undo
+            // something; the bottom of the window is the status bar, which is a
+            // read-out and can be covered for four seconds.
+            toaster: Toaster::new().position(ToasterPosition::BottomEnd),
             frame_ms: 0.0,
             frame_ms_peak: 0.0,
             last_generation: u64::MAX,
@@ -182,12 +197,19 @@ impl App {
             services,
             startup,
             sensors,
+            summary,
             ..
         } = self;
         for (key, table) in persisted_tables(processes, details, services, startup) {
             settings.sync_table(key, table);
         }
         settings.sync_sensors(SENSORS_KEY, &sensors.layout);
+        // Only once there is a choice to keep. Writing the empty string would freeze
+        // "no choice" into the file as if it were one, and the key is read back as a
+        // name the machine no longer has.
+        if !summary.gpu.is_empty() {
+            settings.set(SUMMARY_GPU_KEY, &summary.gpu);
+        }
 
         // Geometry: outer rect, so restoring puts the frame back where it was
         // rather than offsetting the window by the caption height each launch.
@@ -260,10 +282,10 @@ impl eframe::App for App {
         // not needed.
         let _ = azur::desktop::close_popups_on_blur(&ctx);
         let mut action: Option<Action> = None;
-        // Ctrl freezes the row order on the table tabs; mirrored here so the
-        // status bar can say so.
+        // Ctrl holds the row order on the tabs that have one to hold; mirrored
+        // here so the status bar can say so.
         self.order_frozen =
-            ctx.input(|i| i.modifiers.ctrl) && self.tab.is_process_list();
+            ctx.input(|i| i.modifiers.ctrl) && self.tab.holds_order_with_ctrl();
 
         // Global shortcuts.
         ctx.input_mut(|i| {

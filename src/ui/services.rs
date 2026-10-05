@@ -171,6 +171,14 @@ impl ServicesTab {
                         _ => {}
                     }
                 }
+                // What Windows actually starts, which for the many services hosted
+                // in `svchost.exe` is the only thing on the row that tells them
+                // apart -- the name and the description are the service's, and the
+                // program is shared. Read from the registry, and only for the row
+                // the pointer is on: see `RowPainter::detail`.
+                rp.detail("Command line", || {
+                    services::image_path(&s.name).unwrap_or_default()
+                });
             });
 
         self.list.settle(ui, &out, self.order.len(), Some);

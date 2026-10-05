@@ -1214,7 +1214,29 @@ fn paint_proc_row(
         );
     }
 
+    // --- what the columns cannot say --------------------------------------
+    // The command line if the metadata worker has reached this process, and the
+    // image path otherwise. The command line is the better answer where there is
+    // one -- it contains the path and says what the program was told to do, which is
+    // the whole question about a `svchost.exe` or a second `node.exe` -- but it
+    // arrives on a worker thread a moment later than the path does, and a protected
+    // process never yields it at all.
+    process_detail(rp, m.as_deref());
+
     hit
+}
+
+/// Where a process's program lives, for the row tooltip. Shared by the Processes and
+/// Details tabs so one row cannot describe itself two ways.
+pub fn process_detail(rp: &mut RowPainter<'_>, m: Option<&crate::sys::meta::Meta>) {
+    match m.and_then(|m| m.cmdline.as_deref()) {
+        Some(c) => rp.detail("Command line", || c.to_owned()),
+        None => {
+            if let Some(p) = m.and_then(|m| m.path.as_deref()) {
+                rp.detail("Image path", || p.to_owned());
+            }
+        }
+    }
 }
 
 /// Separators apps put between the document and their own name. There is no

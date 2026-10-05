@@ -46,6 +46,12 @@ pub enum Action {
     /// What makes the Summary tab's cards a way *into* the page they summarise
     /// rather than a copy of it.
     ShowResource(performance::Resource),
+    /// Show the foreground application's frame pacing on the Sensors tab.
+    ///
+    /// The counterpart to `ShowResource` for the Summary tab's one card the
+    /// Performance tab has no page for: frame timing is about an application rather
+    /// than about a device, so it lives among the sensors.
+    ShowFrames,
     CopyRow(String),
     Elevate,
     /// Open Windows' Run dialog. The counterpart to `EndTask`, and the one action
