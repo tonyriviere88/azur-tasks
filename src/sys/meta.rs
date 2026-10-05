@@ -100,7 +100,7 @@ impl MetaStore {
 
         let worker_store = Arc::clone(&store);
         std::thread::Builder::new()
-            .name("yatm-meta".into())
+            .name("aztm-meta".into())
             .spawn(move || worker(worker_store, rx))
             .expect("spawn metadata worker");
 

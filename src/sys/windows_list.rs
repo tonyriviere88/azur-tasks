@@ -8,24 +8,28 @@ use std::sync::Arc;
 use windows_sys::core::BOOL;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, TRUE};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindow, GetWindowLongW, GetWindowTextLengthW, GetWindowTextW,
+    EnumWindows, GetShellWindow, GetWindow, GetWindowLongW, GetWindowTextLengthW, GetWindowTextW,
     GetWindowThreadProcessId, IsWindowVisible, GWL_EXSTYLE, GW_OWNER, WS_EX_TOOLWINDOW,
 };
 
 pub struct WindowList {
     /// pid -> title of its most relevant visible window.
     titles: FxHashMap<u32, Arc<str>>,
+    /// The process running the shell, or 0 if this session has none.
+    shell: u32,
 }
 
 impl WindowList {
     pub fn new() -> Self {
         Self {
             titles: FxHashMap::default(),
+            shell: 0,
         }
     }
 
     pub fn refresh(&mut self) {
         self.titles.clear();
+        self.shell = shell_pid();
         // Pass the map by pointer; EnumWindows is synchronous so the borrow
         // cannot outlive this call.
         let ptr = &mut self.titles as *mut FxHashMap<u32, Arc<str>>;
@@ -38,6 +42,36 @@ impl WindowList {
     pub fn title_for(&self, pid: u32) -> Option<Arc<str>> {
         self.titles.get(&pid).cloned()
     }
+
+    /// The shell's process, for telling "this was started *by* the shell" apart
+    /// from "this belongs to the shell". 0 when there is no shell to compare
+    /// against, which no process ever matches.
+    #[inline]
+    pub fn shell(&self) -> u32 {
+        self.shell
+    }
+}
+
+/// Which process is the shell, asked by the documented route rather than by
+/// looking for `explorer.exe`.
+///
+/// `GetShellWindow` returns the shell's desktop window for this session -- the
+/// window the shell registers with `SetShellWindow`, which is what makes a process
+/// *the* shell rather than merely an instance of the shell's image. Two things
+/// follow that a name comparison gets wrong: with "launch folder windows in a
+/// separate process" there are several `explorer.exe` and only one of them is the
+/// shell, and a session with no shell at all (Server Core, or the seconds after
+/// the shell crashes) reports nothing instead of matching whatever restarts.
+///
+/// Re-read every tick: a restarted shell comes back under a new pid.
+fn shell_pid() -> u32 {
+    let hwnd = unsafe { GetShellWindow() };
+    if hwnd.is_null() {
+        return 0;
+    }
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+    pid
 }
 
 unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {

@@ -8,6 +8,7 @@ use super::fmt;
 use super::icons::IconCache;
 use super::table::{Align, Column, RowPainter, Table};
 use super::theme::Theme;
+use azur_egui_theme::components::{ContextMenu, Text, TextColor, TextVariant};
 use crate::sys::meta::MetaStore;
 use crate::sys::snapshot::{Category, Proc, ProcKey, RunState, Snapshot};
 use egui::{Id, Rect, Ui, Vec2};
@@ -42,6 +43,18 @@ enum RowKind {
     Group(Category),
     /// Index into `Snapshot::procs`.
     Proc(u32),
+    /// Header of the section accounting for RAM no process owns.
+    SysGroup,
+    /// One term of that section.
+    Sys(SysRow),
+}
+
+impl RowKind {
+    /// Whether clicking anywhere on the row folds it, rather than only on the
+    /// disclosure triangle.
+    fn is_section(self) -> bool {
+        matches!(self, Self::Group(_) | Self::SysGroup)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -53,6 +66,136 @@ struct Row {
     expanded: bool,
 }
 
+/// The physical RAM the process rows cannot account for, split into the
+/// populations that make it up.
+///
+/// The Memory column apportions `WorkingSetPrivateSize`: pages that are resident
+/// *and* private *and* attributable to exactly one process. The header's
+/// percentage is `PhysicalTotal - PhysicalAvailable` -- every page that is not
+/// free, zeroed, or on the standby list, the kernel's included. Three whole
+/// populations are in the second number and in none of the rows:
+///
+///   - pages shared between processes. A DLL mapped by fifty programs is
+///     resident once; charging all fifty would multiply it by fifty and charging
+///     one would be arbitrary, so the private working set charges nobody.
+///   - the kernel's own memory -- pool, drivers, page tables. It heads no
+///     process, so it has no row to appear in.
+///   - the modified list: pages already evicted from a working set, still in RAM,
+///     waiting to be written to the page file.
+///
+/// Only the last two can be read off a counter. Measuring the shared pages
+/// properly would mean asking about every page of every process, because
+/// `WorkingSetSize - WorkingSetPrivateSize` counts each shared page once per
+/// process that maps it and so overstates by however much sharing is going on.
+/// It is taken as the remainder instead. That is exact by construction, and it is
+/// what makes the section close the gap rather than merely narrow it: the process
+/// rows plus this section equal the header total, always.
+#[derive(Clone, Copy, Default)]
+struct SysMem {
+    /// Everything left over: shared and mapped pages, page tables, kernel
+    /// stacks, the RAM virtualization-based security hides from every caller.
+    shared: u64,
+    /// Resident pool and drivers.
+    kernel: u64,
+    /// The modified page list.
+    transit: u64,
+    /// System RAM the display driver has locked for the GPU. Part of the terms
+    /// above rather than a fourth one -- WDDM charges most of it to the process
+    /// that allocated it -- so it is shown for scale and never added in.
+    gpu: u64,
+    /// `shared + kernel + transit`, and equally `in_use` less what the rows own.
+    total: u64,
+}
+
+impl SysMem {
+    fn of(snap: &Snapshot) -> Self {
+        // What the rows above already account for, by the same measure they
+        // display. Folded parents report a subtree total, but every process is
+        // listed exactly once, so the flat sum is the same number.
+        let attributed: u64 = snap.procs.iter().map(|p| p.private_ws).sum();
+        let total = snap.mem.in_use.saturating_sub(attributed);
+
+        // `paged_pool` is the whole pool, including the part that has been paged
+        // out and is therefore not resident at all. On this machine that
+        // overstates by around a twentieth of the pool -- 0.1 GB against a 50 GB
+        // total -- and separating it costs another counter on every sample. The
+        // error lands in `shared`, which is a remainder and not a measurement
+        // for exactly this reason.
+        //
+        // Clamped, and in this order, so the three terms always sum to `total`
+        // even mid-sample when the pools and the physical total disagree.
+        let kernel = snap
+            .mem
+            .paged_pool
+            .saturating_add(snap.mem.nonpaged_pool)
+            .min(total);
+        let transit = snap.mem.modified.min(total - kernel);
+        Self {
+            shared: total - kernel - transit,
+            kernel,
+            transit,
+            gpu: snap.gpus.iter().map(|g| g.shared_used).sum(),
+            total,
+        }
+    }
+}
+
+/// One line of the system section, in the order they are shown under a header.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SysRow {
+    Shared,
+    Kernel,
+    Transit,
+    Gpu,
+}
+
+impl SysRow {
+    const COUNT: usize = 4;
+    const ALL: [SysRow; Self::COUNT] = [Self::Shared, Self::Kernel, Self::Transit, Self::Gpu];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Shared => "Shared code & mapped files",
+            Self::Kernel => "Windows kernel",
+            Self::Transit => "In transit to the page file",
+            // Named as already counted on purpose: it overlaps the three others
+            // instead of extending them, and a bare "GPU driver" sitting in a
+            // column of addends reads as a fourth addend. Worded without
+            // reference to position, because the flat list has no section for it
+            // to sit at the bottom of -- there it ranks by size like everything
+            // else, and can come out anywhere.
+            Self::Gpu => "GPU driver (already counted)",
+        }
+    }
+
+    fn value(self, m: &SysMem) -> u64 {
+        match self {
+            Self::Shared => m.shared,
+            Self::Kernel => m.kernel,
+            Self::Transit => m.transit,
+            Self::Gpu => m.gpu,
+        }
+    }
+}
+
+/// One entry at the top level of a list: a process, with whatever subtree hangs
+/// off it, or a single system reading.
+#[derive(Clone, Copy)]
+enum Top {
+    /// Index into `Snapshot::procs`.
+    Proc(u32),
+    Sys(SysRow),
+}
+
+/// Where a top-level entry sorts.
+///
+/// The `u8` is a bucket, compared ascending whatever the sort direction, so that
+/// a row with nothing to compare stays out of the way at the bottom instead of
+/// being carried to the top by a reversal: a reading has no user name and no
+/// publisher, and inventing an empty string for it would rank it *first* under an
+/// ascending sort of those columns.
+type TopKey = (u8, f64);
+
 pub struct ProcessesTab {
     pub table: Table,
     rows: Vec<Row>,
@@ -60,6 +203,9 @@ pub struct ProcessesTab {
     /// Manager, so the list opens as a short summary rather than 600 rows.
     expanded: FxHashSet<ProcKey>,
     collapsed_groups: FxHashSet<Category>,
+    /// Fold state of the system section, which is not keyed by [`Category`]: no
+    /// process is in it.
+    system_collapsed: bool,
     pub selected: Option<ProcKey>,
     /// Row index of the selection in the current list, for row highlighting.
     selected_row: Option<usize>,
@@ -73,6 +219,10 @@ pub struct ProcessesTab {
     /// `Snapshot::procs` shift as processes come and go, so an index-based
     /// freeze would silently start showing the wrong process.
     rank: rustc_hash::FxHashMap<ProcKey, u32>,
+    /// The same, for the system readings, which have no [`ProcKey`] to be keyed
+    /// by. Indexed by [`SysRow`]; `u32::MAX` until a first unfrozen build has
+    /// placed them.
+    sys_rank: [u32; SysRow::COUNT],
     /// True while the sort order is held still (Ctrl held down).
     frozen: bool,
 
@@ -105,16 +255,26 @@ impl ProcessesTab {
         ];
         // Sorted by name, ascending, which is also what turns grouping on.
         let mut table = Table::new(cols, C_NAME, false);
-        table.row_h = 26.0;
+        // Name, CPU, Memory, Disk, PID and nothing else: the five a reader opens
+        // this tab to see. Status, Type, User name and Publisher are off by
+        // default and one click away in the header's context menu, the same
+        // arrangement the Details tab uses for its own long tail.
+        for c in table.cols.iter_mut() {
+            if matches!(c.id, C_STATUS | C_TYPE | C_USER | C_PUBLISHER) {
+                c.visible = false;
+            }
+        }
         Self {
             table,
             rows: Vec::new(),
             expanded: FxHashSet::default(),
             collapsed_groups: FxHashSet::default(),
+            system_collapsed: false,
             selected: None,
             selected_row: None,
             built_grouped: true,
             rank: rustc_hash::FxHashMap::default(),
+            sys_rank: [u32::MAX; SysRow::COUNT],
             frozen: false,
             built_generation: u64::MAX,
             built_filter: String::new(),
@@ -200,8 +360,15 @@ impl ProcessesTab {
         let sort_by = self.table.sort_by;
         let desc = self.table.sort_desc;
 
+        // The RAM no process row owns. Left out while filtering: the readings
+        // exist to reconcile the rows with the header total, and a filtered list
+        // does not add up to that anyway -- shown there they would read as four
+        // more things matching the search.
+        let sys = SysMem::of(snap);
+        let sys = (filter.is_empty() && sys.total > 0).then_some(sys);
+
         if self.grouped() {
-            for cat in [Category::App, Category::Background] {
+            for cat in Category::ALL {
                 // Only emit a group that has visible content.
                 let any = snap
                     .procs
@@ -221,10 +388,36 @@ impl ProcessesTab {
                 if collapsed {
                     continue;
                 }
-                self.emit_roots(snap, meta, Some(cat), sort_by, desc, 1);
+                self.emit_roots(snap, meta, Some(cat), sort_by, desc, 1, None);
+            }
+            // Grouping is what the name sort does (see `grouped`), so here the
+            // readings are a section like the others rather than nine rows mixed
+            // into an alphabetical list. Last, because the order of the sections
+            // is fixed and this is the one that is not about processes.
+            if let Some(sys) = sys {
+                self.rows.push(Row {
+                    kind: RowKind::SysGroup,
+                    depth: 0,
+                    has_children: true,
+                    expanded: !self.system_collapsed,
+                });
+                if !self.system_collapsed {
+                    // A term at zero has nothing to say: no GPU reporting shared
+                    // memory, or a machine that has not modified a page yet.
+                    for kind in SysRow::ALL.into_iter().filter(|k| k.value(&sys) > 0) {
+                        self.rows.push(Row {
+                            kind: RowKind::Sys(kind),
+                            depth: 1,
+                            has_children: false,
+                            expanded: false,
+                        });
+                    }
+                }
             }
         } else {
-            self.emit_roots(snap, meta, None, sort_by, desc, 0);
+            // Flat: no section headers for anything, readings included, and they
+            // take their place in the ranking by the column being sorted.
+            self.emit_roots(snap, meta, None, sort_by, desc, 0, sys.as_ref());
         }
 
         // Record the order so a later freeze has something to hold on to.
@@ -233,9 +426,14 @@ impl ProcessesTab {
         if !self.frozen {
             self.rank.clear();
             self.rank.reserve(self.rows.len());
+            self.sys_rank = [u32::MAX; SysRow::COUNT];
             for (pos, row) in self.rows.iter().enumerate() {
-                if let RowKind::Proc(i) = row.kind {
-                    self.rank.insert(snap.procs[i as usize].key(), pos as u32);
+                match row.kind {
+                    RowKind::Proc(i) => {
+                        self.rank.insert(snap.procs[i as usize].key(), pos as u32);
+                    }
+                    RowKind::Sys(kind) => self.sys_rank[kind as usize] = pos as u32,
+                    RowKind::Group(_) | RowKind::SysGroup => {}
                 }
             }
         }
@@ -249,6 +447,7 @@ impl ProcessesTab {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn emit_roots(
         &mut self,
         snap: &Snapshot,
@@ -257,27 +456,25 @@ impl ProcessesTab {
         sort_by: u16,
         desc: bool,
         base_depth: u16,
+        sys: Option<&SysMem>,
     ) {
         self.sort_buf.clear();
-        match cat {
-            None => {
-                for &r in &snap.roots {
-                    if self.matched[r as usize] {
-                        self.sort_buf.push(r);
-                    }
-                }
-            }
-            Some(c) => {
-                // `group`/`group_head` come from the sampler, which assigns a
-                // whole subtree to one group. Selecting on `category` here
-                // instead would both hide an app launched by a shell and make a
-                // browser look childless (its renderers are background
-                // processes, but they belong under the browser).
-                for (i, p) in snap.procs.iter().enumerate() {
-                    if p.group == c && p.group_head && self.matched[i] {
-                        self.sort_buf.push(i as u32);
-                    }
-                }
+        // The top level is the group *heads*, and never `snap.roots`: those are the
+        // roots of the parent-pid tree, which files every task the reader launched
+        // under the shell and most of the machine under session 0. `assign_groups`
+        // has already applied Task Manager's rule (see `sampler::is_launcher`) and
+        // left the answer in `group_head` -- a process whose parent merely started
+        // it heads its own entry. That is a fact about the process, not about the
+        // ordering, so it holds whether or not the list is split into sections;
+        // sections only narrow which heads belong to this one.
+        //
+        // `group`/`group_head` come from the sampler, which assigns a whole subtree
+        // to one group. Selecting on `category` here instead would both hide an app
+        // launched by a shell and make a browser look childless (its renderers are
+        // background processes, but they belong under the browser).
+        for (i, p) in snap.procs.iter().enumerate() {
+            if p.group_head && self.matched[i] && cat.is_none_or(|c| p.group == c) {
+                self.sort_buf.push(i as u32);
             }
         }
         // Taken out so the frozen rank can be read while `sort_buf` is borrowed
@@ -286,10 +483,80 @@ impl ProcessesTab {
         let frozen = self.frozen.then_some(&rank);
         sort_indices(&mut self.sort_buf, snap, meta, sort_by, desc, frozen);
 
-        // Depth-first, pushing children in reverse so they pop in sorted order.
-        self.stack.clear();
-        for &r in self.sort_buf.iter().rev() {
-            self.stack.push((r, base_depth));
+        // The system readings join the top level as entries in their own right,
+        // ordered by the same column as everything else. Without that, the Memory
+        // column would rank six hundred processes and leave the four largest
+        // figures on the machine sitting wherever they were put -- a ranking that
+        // omits its biggest rows tells the reader something false.
+        //
+        // Merged after `sort_indices` rather than inside it: that function is
+        // shared with the Details tab, which has no readings to place, and it is
+        // what resolves the name-like columns and the frozen order. The pass below
+        // is stable and keyed the same way, so it disturbs neither -- the
+        // processes arrive already ordered and keep that order among themselves,
+        // ties included.
+        let sys_rank = self.sys_rank;
+        let mut tops: Vec<Top> = self.sort_buf.iter().copied().map(Top::Proc).collect();
+        if let Some(sys) = sys {
+            tops.extend(
+                SysRow::ALL
+                    .into_iter()
+                    .filter(|k| k.value(sys) > 0)
+                    .map(Top::Sys),
+            );
+
+            let key = |top: &Top| -> TopKey {
+                // A frozen rank is a display position, so it sorts ascending and
+                // never by value -- which is the whole point of the freeze.
+                if frozen.is_some() {
+                    return match *top {
+                        Top::Proc(i) => (
+                            0,
+                            frozen
+                                .and_then(|r| r.get(&snap.procs[i as usize].key()).copied())
+                                .unwrap_or(u32::MAX) as f64,
+                        ),
+                        Top::Sys(kind) => (0, sys_rank[kind as usize] as f64),
+                    };
+                }
+                match *top {
+                    Top::Proc(i) => {
+                        let p = &snap.procs[i as usize];
+                        match sort_by {
+                            C_CPU => (0, p.sub_cpu as f64),
+                            C_MEM => (0, p.sub_private_ws as f64),
+                            C_DISK => (0, p.sub_disk_bps as f64),
+                            C_PID => (0, p.pid as f64),
+                            // A string column. The processes are already in order
+                            // from `sort_indices`; bucket 0 keeps them there, and
+                            // the readings go in bucket 1, after them.
+                            _ => (0, 0.0),
+                        }
+                    }
+                    Top::Sys(kind) => match sort_by {
+                        C_MEM => (0, kind.value(sys) as f64),
+                        // No thread, no bytes moved and no PID: zero sinks a
+                        // reading under those columns exactly as it sinks an idle
+                        // process, which is the honest answer rather than a
+                        // special case.
+                        C_CPU | C_DISK | C_PID => (0, 0.0),
+                        _ => (1, 0.0),
+                    },
+                }
+            };
+
+            // Ascending while frozen, whatever the sort direction says: see above.
+            let ascending = frozen.is_some() || !desc;
+            tops.sort_by(|a, b| {
+                let ((ba, va), (bb, vb)) = (key(a), key(b));
+                ba.cmp(&bb).then_with(|| {
+                    if ascending {
+                        va.total_cmp(&vb)
+                    } else {
+                        vb.total_cmp(&va)
+                    }
+                })
+            });
         }
 
         // A child nests here unless it heads a group of its own (an app launched
@@ -297,38 +564,59 @@ impl ProcessesTab {
         // every process is listed exactly once. Kept identical to the expansion
         // filter below so an expander never opens onto an empty subtree.
         let visible_child = |snap: &Snapshot, matched: &[bool], c: u32| -> bool {
-            matched[c as usize] && (cat.is_none() || !snap.procs[c as usize].group_head)
+            matched[c as usize] && !snap.procs[c as usize].group_head
         };
 
         let mut children: Vec<u32> = Vec::new();
-        while let Some((idx, depth)) = self.stack.pop() {
-            let p = &snap.procs[idx as usize];
-            let key = p.key();
-            let has_children = p.has_children()
-                && snap
-                    .children_of(idx as usize)
-                    .iter()
-                    .any(|&c| visible_child(snap, &self.matched, c));
-            let expanded = has_children && self.expanded.contains(&key);
+        // One entry at a time, each subtree finished before the next entry starts,
+        // so a reading can sit between two processes without landing inside one of
+        // their subtrees.
+        for top in tops {
+            let root = match top {
+                Top::Sys(kind) => {
+                    self.rows.push(Row {
+                        kind: RowKind::Sys(kind),
+                        depth: base_depth,
+                        has_children: false,
+                        expanded: false,
+                    });
+                    continue;
+                }
+                Top::Proc(i) => i,
+            };
 
-            self.rows.push(Row {
-                kind: RowKind::Proc(idx),
-                depth,
-                has_children,
-                expanded,
-            });
-
-            if expanded {
-                children.clear();
-                children.extend(
-                    snap.children_of(idx as usize)
+            // Depth-first, pushing children in reverse so they pop in sorted order.
+            self.stack.clear();
+            self.stack.push((root, base_depth));
+            while let Some((idx, depth)) = self.stack.pop() {
+                let p = &snap.procs[idx as usize];
+                let key = p.key();
+                let has_children = p.has_children()
+                    && snap
+                        .children_of(idx as usize)
                         .iter()
-                        .copied()
-                        .filter(|&c| visible_child(snap, &self.matched, c)),
-                );
-                sort_indices(&mut children, snap, meta, sort_by, desc, frozen);
-                for &c in children.iter().rev() {
-                    self.stack.push((c, depth + 1));
+                        .any(|&c| visible_child(snap, &self.matched, c));
+                let expanded = has_children && self.expanded.contains(&key);
+
+                self.rows.push(Row {
+                    kind: RowKind::Proc(idx),
+                    depth,
+                    has_children,
+                    expanded,
+                });
+
+                if expanded {
+                    children.clear();
+                    children.extend(
+                        snap.children_of(idx as usize)
+                            .iter()
+                            .copied()
+                            .filter(|&c| visible_child(snap, &self.matched, c)),
+                    );
+                    sort_indices(&mut children, snap, meta, sort_by, desc, frozen);
+                    for &c in children.iter().rev() {
+                        self.stack.push((c, depth + 1));
+                    }
                 }
             }
         }
@@ -371,12 +659,38 @@ impl ProcessesTab {
             self.dirty = false;
         }
 
+        // What the whole machine is doing, under the column that apportions it --
+        // Task Manager's headline figures. The rows below add up to these, so the
+        // header is where they belong: a row's 0.4% means little until you know
+        // the machine is at 6%.
+        //
+        // Disk is the busiest volume rather than a sum, the same choice the
+        // Performance tab's disk cards make: two disks at 50% is not one disk at
+        // 100%, and a total over 100% would read as a bug.
         let id = Id::new("processes");
-        if self.table.header(ui, t, id) {
+        let mut cpu = String::new();
+        fmt::percent_sign(&mut cpu, snap.cpu.total);
+        let mut mem = String::new();
+        fmt::percent_sign(&mut mem, snap.mem.percent());
+        let mut disk = String::new();
+        fmt::percent_sign(
+            &mut disk,
+            snap.disks.iter().map(|d| d.active_pct).fold(0.0, f32::max),
+        );
+        if self.table.header_with(
+            ui,
+            t,
+            id,
+            &[(C_CPU, &cpu), (C_MEM, &mem), (C_DISK, &disk)],
+        ) {
             self.dirty = true;
         }
 
         let slots = Slots::build(&self.table);
+        // Resolved once per frame rather than per painted row: it sums the private
+        // working set of every process, which is not something to repeat forty
+        // times while scrolling.
+        let sys = SysMem::of(snap);
         let ctx = ui.ctx().clone();
         let rows = std::mem::take(&mut self.rows);
         let mut toggle: Option<usize> = None;
@@ -409,6 +723,13 @@ impl ProcessesTab {
                         let p = &snap.procs[idx as usize];
                         paint_proc_row(rp, t, p, &row, meta, icons, &ctx, &slots, &mut buf)
                     }
+                    RowKind::SysGroup => {
+                        paint_sys_group_row(rp, t, &sys, row.expanded, &slots, &mut buf)
+                    }
+                    RowKind::Sys(kind) => {
+                        paint_sys_row(rp, t, kind, &sys, &row, &slots, &mut buf);
+                        None
+                    }
                 };
                 if rp.hovered {
                     expander_hit = hit;
@@ -419,6 +740,9 @@ impl ProcessesTab {
         self.scratch = buf;
 
         // --- interaction --------------------------------------------------
+        // Only a process can be the selection, which is what disables End task,
+        // the context menu and the inspector on every other kind of row: they all
+        // read `selected`, and clicking a section clears it.
         if let Some(r) = out.clicked_row.or(out.context_row) {
             if let Some(row) = rows.get(r) {
                 match row.kind {
@@ -426,7 +750,7 @@ impl ProcessesTab {
                         self.selected = Some(snap.procs[idx as usize].key());
                         self.selected_row = Some(r);
                     }
-                    RowKind::Group(_) => {
+                    _ => {
                         self.selected = None;
                         self.selected_row = None;
                     }
@@ -443,8 +767,7 @@ impl ProcessesTab {
                     // Widen the triangle's 16px box a little: it is a small
                     // target, and being one pixel off should not feel broken.
                     .is_some_and(|(rect, pos)| rect.expand(3.0).contains(pos));
-                let is_group = matches!(row.kind, RowKind::Group(_));
-                if (row.has_children && on_expander) || is_group {
+                if (row.has_children && on_expander) || row.kind.is_section() {
                     toggle = Some(r);
                 }
             }
@@ -517,7 +840,7 @@ impl ProcessesTab {
                     self.selected_row = Some(t);
                     self.selected = match rows[t].kind {
                         RowKind::Proc(i) => Some(snap.procs[i as usize].key()),
-                        RowKind::Group(_) => None,
+                        _ => None,
                     };
                     self.table.scroll_to_row = Some(t);
                 }
@@ -537,6 +860,9 @@ impl ProcessesTab {
                         self.expanded.insert(key);
                     }
                 }
+                RowKind::SysGroup => self.system_collapsed = !self.system_collapsed,
+                // A leaf: nothing under it to fold away.
+                RowKind::Sys(_) => {}
             }
             self.dirty = true;
         }
@@ -549,17 +875,20 @@ impl ProcessesTab {
                 let name = p.name.clone();
                 let pid = p.pid;
                 let path = meta.get(key).and_then(|m| m.path.clone());
-                out.response.context_menu(|ui| {
+                ContextMenu::new(&out.response).show(&ctx, |ui| {
                     super::process_context_menu(ui, t, pid, &name, key, path.as_deref(), action);
                 });
             } else {
-                // Keep egui's menu bookkeeping consistent on group rows.
-                out.response.context_menu(|ui| {
-                    ui.label("No process selected");
+                // A section header or a system reading. Nothing here can be ended,
+                // inspected or located on disk, so the menu says so rather than
+                // offering actions that would have no target -- and it is still
+                // opened, to keep the menu's bookkeeping consistent.
+                ContextMenu::new(&out.response).show(&ctx, |ui| {
+                    ui.add(no_process());
                 });
             }
         } else {
-            out.response.context_menu(|ui| {
+            ContextMenu::new(&out.response).show(&ctx, |ui| {
                 if let Some(key) = self.selected {
                     if let Some(i) = snap.find_by_key(key) {
                         let p = &snap.procs[i];
@@ -576,7 +905,7 @@ impl ProcessesTab {
                         return;
                     }
                 }
-                ui.label("No process selected");
+                ui.add(no_process());
             });
         }
 
@@ -626,15 +955,15 @@ fn paint_group_row(
 ) -> Option<Rect> {
     // Group rows get their own surface so the hierarchy reads at a glance.
     rp.painter
-        .rect_filled(rp.rect, egui::CornerRadius::ZERO, t.surface);
+        .rect_filled(rp.rect, egui::CornerRadius::ZERO, t.bg.card);
     rp.painter.hline(
         rp.rect.x_range(),
         rp.rect.bottom() - 0.5,
-        egui::Stroke::new(1.0, t.border_soft),
+        egui::Stroke::new(1.0, t.stroke.subtle),
     );
 
     let name_slot = slots.of(C_NAME);
-    let hit = name_slot.map(|s| rp.expander(s, 6.0, expanded, t.text_dim));
+    let hit = name_slot.map(|s| rp.expander(s, 6.0, expanded, t.text.secondary));
 
     // Aggregate everything displayed under this group, including nested rows,
     // so the header total matches what expanding it would reveal.
@@ -655,24 +984,108 @@ fn paint_group_row(
     use std::fmt::Write;
     let _ = write!(buf, "{} ({count})", cat.label());
     if let Some(s) = name_slot {
-        rp.text_font(s, buf, t.text, Align::Left, &t.fonts.medium);
+        rp.text_font(s, buf, t.text.primary, Align::Left, &t.fonts.body_strong);
     }
 
     let mut b = String::new();
     if let Some(s) = slots.of(C_CPU) {
         fmt::percent(&mut b, cpu);
-        rp.text_font(s, &b, t.text_dim, Align::Right, &t.fonts.medium);
+        rp.text_font(s, &b, t.text.secondary, Align::Right, &t.fonts.body_strong);
     }
     if let Some(s) = slots.of(C_MEM) {
         fmt::mem_mb(&mut b, mem);
-        rp.text_font(s, &b, t.text_dim, Align::Right, &t.fonts.medium);
+        rp.text_font(s, &b, t.text.secondary, Align::Right, &t.fonts.body_strong);
     }
     if let Some(s) = slots.of(C_DISK) {
         fmt::rate_mbs(&mut b, disk);
-        rp.text_font(s, &b, t.text_dim, Align::Right, &t.fonts.medium);
+        rp.text_font(s, &b, t.text.secondary, Align::Right, &t.fonts.body_strong);
     }
 
     hit
+}
+
+/// Where a system row puts its label: level with the process names above it,
+/// past the space their expander and icon take up. Nothing in this section has
+/// either, but the column is read as one list and a label that started 39px to
+/// the left would read as a different one.
+const SYS_LABEL_X: f32 = 18.0 + 21.0;
+
+/// Header of the system section. Returns the disclosure triangle's hit rect.
+///
+/// Deliberately the same surface, rule and weight as [`paint_group_row`]: it is a
+/// section of the list at the same level as Apps and Background processes, and
+/// giving it its own chrome would suggest it belongs to something else.
+fn paint_sys_group_row(
+    rp: &mut RowPainter<'_>,
+    t: &Theme,
+    sys: &SysMem,
+    expanded: bool,
+    slots: &Slots,
+    buf: &mut String,
+) -> Option<Rect> {
+    rp.painter
+        .rect_filled(rp.rect, egui::CornerRadius::ZERO, t.bg.card);
+    rp.painter.hline(
+        rp.rect.x_range(),
+        rp.rect.bottom() - 0.5,
+        egui::Stroke::new(1.0, t.stroke.subtle),
+    );
+
+    let name_slot = slots.of(C_NAME);
+    let hit = name_slot.map(|s| rp.expander(s, 6.0, expanded, t.text.secondary));
+
+    if let Some(s) = name_slot {
+        // Named for what it is rather than "System": collapsed, this row is the
+        // only thing a reader has to go on, and "System" alone would read as the
+        // System process -- which is in Background processes, and tiny.
+        rp.text_font(
+            s,
+            "System & shared memory",
+            t.text.primary,
+            Align::Left,
+            &t.fonts.body_strong,
+        );
+    }
+    // CPU and Disk stay empty. None of this holds a thread or issues I/O, and a
+    // zero in those columns would read as an idle process rather than as a
+    // dimension that does not apply.
+    if let Some(s) = slots.of(C_MEM) {
+        fmt::mem_mb(buf, sys.total);
+        rp.text_font(s, buf, t.text.secondary, Align::Right, &t.fonts.body_strong);
+    }
+
+    hit
+}
+
+/// One term of the system section.
+fn paint_sys_row(
+    rp: &mut RowPainter<'_>,
+    t: &Theme,
+    kind: SysRow,
+    sys: &SysMem,
+    row: &Row,
+    slots: &Slots,
+    buf: &mut String,
+) {
+    // The GPU line overlaps the three above it instead of extending them, so it
+    // is held back from the addends it sits among: same row, quieter voice.
+    let overlapping = kind == SysRow::Gpu;
+    let (label_color, value_color) = if overlapping {
+        (t.text.tertiary, t.text.tertiary)
+    } else {
+        (t.text.secondary, t.text.primary)
+    };
+
+    if let Some(s) = slots.of(C_NAME) {
+        rp.text_indent(s, row_indent(row.depth) + SYS_LABEL_X, kind.label(), label_color);
+    }
+    if let Some(s) = slots.of(C_MEM) {
+        // No `heat` tint. The bar behind a process's figure means "this one is
+        // heavy for a process"; there is no comparable expectation of a term that
+        // is measuring the whole machine, so a full bar would only alarm.
+        fmt::mem_mb(buf, kind.value(sys));
+        rp.text(s, buf, value_color, Align::Right);
+    }
 }
 
 /// Returns the disclosure triangle's hit rect, when this row has one.
@@ -702,7 +1115,7 @@ fn paint_proc_row(
     let name_slot = slots.of(C_NAME);
     let mut x = indent;
     let hit = match (name_slot, row.has_children) {
-        (Some(s), true) => Some(rp.expander(s, x, row.expanded, t.text_dim)),
+        (Some(s), true) => Some(rp.expander(s, x, row.expanded, t.text.secondary)),
         _ => None,
     };
     x += 18.0;
@@ -723,16 +1136,18 @@ fn paint_proc_row(
     let mut reordered = String::new();
     let desc = m.as_ref().and_then(|m| m.description.as_deref());
     let label: &str = match (&p.window_title, desc) {
-        (Some(title), _) if p.category == Category::App => {
+        // Anything that owns a window is named by it, including a suspended app --
+        // being frozen changes which section it sits in, not what it is called.
+        (Some(title), _) if p.category != Category::Background => {
             app_first(title, desc, &p.name, &mut reordered)
         }
         (_, Some(d)) => d,
         _ => &p.name,
     };
     let name_color = if p.state == RunState::Suspended {
-        t.text_dim
+        t.text.secondary
     } else {
-        t.text
+        t.text.primary
     };
     if let Some(s) = name_slot {
         rp.text_indent(s, x, label, name_color);
@@ -740,44 +1155,44 @@ fn paint_proc_row(
 
     // --- Status -----------------------------------------------------------
     if let (Some(s), RunState::Suspended) = (slots.of(C_STATUS), p.state) {
-        rp.pill(s, "Suspended", t.warn, t.accent_soft.gamma_multiply(0.8));
+        rp.pill(s, "Suspended", t.status.warning, t.accent.subtle.gamma_multiply(0.8));
     }
 
     // --- CPU / Memory / Disk ---------------------------------------------
     if let Some(s) = slots.of(C_CPU) {
-        rp.heat(s, cpu / 25.0);
+        rp.heat(s, cpu / 25.0, t.cpu);
         fmt::percent(buf, cpu);
         rp.text(s, buf, t.load_text(cpu), Align::Right);
     }
 
     // Tint memory relative to a 2 GB reference; above that it is notable.
     if let Some(s) = slots.of(C_MEM) {
-        rp.heat(s, mem as f32 / (2.0 * 1024.0 * 1024.0 * 1024.0));
+        rp.heat(s, mem as f32 / (2.0 * 1024.0 * 1024.0 * 1024.0), t.mem);
         fmt::mem_mb(buf, mem);
-        rp.text(s, buf, t.text, Align::Right);
+        rp.text(s, buf, t.text.primary, Align::Right);
     }
 
     // 20 MB/s of I/O is a busy process.
     if let Some(s) = slots.of(C_DISK) {
-        rp.heat(s, disk / (20.0 * 1024.0 * 1024.0));
+        rp.heat(s, disk / (20.0 * 1024.0 * 1024.0), t.disk);
         fmt::rate_mbs(buf, disk);
-        let disk_color = if disk < 0.05 { t.text_faint } else { t.text };
+        let disk_color = if disk < 0.05 { t.text.tertiary } else { t.text.primary };
         rp.text(s, buf, disk_color, Align::Right);
     }
 
     // --- PID / Type / User / Publisher -----------------------------------
     if let Some(s) = slots.of(C_PID) {
         fmt::integer(buf, p.pid as u64);
-        rp.text_font(s, buf, t.text_dim, Align::Right, &t.fonts.mono);
+        rp.text_font(s, buf, t.text.secondary, Align::Right, &t.fonts.mono);
     }
 
     if let Some(s) = slots.of(C_TYPE) {
-        rp.text(s, p.category.type_label(), t.text_faint, Align::Left);
+        rp.text(s, p.category.type_label(), t.text.tertiary, Align::Left);
     }
 
     if let Some(s) = slots.of(C_USER) {
         let user = m.as_ref().and_then(|m| m.user.clone());
-        rp.text(s, user.as_deref().unwrap_or("—"), t.text_dim, Align::Left);
+        rp.text(s, user.as_deref().unwrap_or("—"), t.text.secondary, Align::Left);
     }
 
     if let Some(s) = slots.of(C_PUBLISHER) {
@@ -785,7 +1200,7 @@ fn paint_proc_row(
         rp.text(
             s,
             publisher.as_deref().unwrap_or("—"),
-            t.text_faint,
+            t.text.tertiary,
             Align::Left,
         );
     }
@@ -797,12 +1212,11 @@ fn paint_proc_row(
             egui::Pos2::new(cell.right() - 12.0, cell.center().y),
             Vec2::splat(11.0),
         );
-        super::icons::glyph(
+        super::icons::draw(
             &rp.painter.with_clip_rect(cell),
             r,
             super::icons::Glyph::Shield,
-            t.warn.gamma_multiply(0.85),
-            t,
+            t.status.warning.gamma_multiply(0.85),
         );
     }
 
@@ -993,9 +1407,326 @@ pub fn sort_indices(
     }
 }
 
+/// The one-line stand-in for a context menu opened where there is no process:
+/// a group header, or an empty list.
+fn no_process() -> Text<'static> {
+    Text::new("No process selected")
+        .variant(TextVariant::Caption)
+        .color(TextColor::Tertiary)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::app_first;
+    use super::{app_first, ProcessesTab, RowKind, SysMem, C_CPU, C_MEM, C_NAME};
+    use crate::sys::meta::MetaStore;
+    use crate::sys::snapshot::{Category, MemStats, Proc, Snapshot};
+    use std::sync::Arc;
+
+    /// Seven processes wired the way `Sampler::build_tree` and
+    /// `Sampler::assign_groups` would leave them, small enough to reason about:
+    ///
+    /// ```text
+    /// System        session 0, tree root      head
+    ///   services    session 0                 head -- parent is session 0
+    ///     svchost   session 0                 head -- parent is session 0
+    ///   explorer    session 1, the shell      head -- parent is session 0
+    ///     notepad   session 1, a window       head -- parent is the shell
+    ///     chrome    session 1, a window       head -- parent is the shell
+    ///       tab     session 1, background     nests under chrome
+    /// ```
+    ///
+    /// Six of the seven head their own entry, so the only nesting the list should
+    /// ever draw is the last one.
+    fn machine() -> Snapshot {
+        let head = |pid, parent, name: &str, group, start, len| Proc {
+            pid,
+            name: Arc::from(name),
+            session: if pid < 500 { 0 } else { 1 },
+            category: group,
+            group,
+            group_head: true,
+            parent,
+            child_start: start,
+            child_len: len,
+            ..Default::default()
+        };
+        Snapshot {
+            procs: vec![
+                head(4, u32::MAX, "System", Category::Background, 0, 2),
+                head(100, 0, "services.exe", Category::Background, 2, 1),
+                head(200, 1, "svchost.exe", Category::Background, 3, 0),
+                head(500, 0, "explorer.exe", Category::Background, 3, 2),
+                head(600, 3, "notepad.exe", Category::App, 5, 0),
+                head(700, 3, "chrome.exe", Category::App, 5, 1),
+                Proc {
+                    pid: 701,
+                    name: Arc::from("chrome.exe"),
+                    session: 1,
+                    // A renderer: background on its own merits, displayed in Apps
+                    // under the browser that owns it.
+                    category: Category::Background,
+                    group: Category::App,
+                    group_head: false,
+                    parent: 5,
+                    child_start: 6,
+                    child_len: 0,
+                    depth: 1,
+                    ..Default::default()
+                },
+            ],
+            child_links: vec![1, 3, 2, 4, 5, 6],
+            roots: vec![0],
+            ..Default::default()
+        }
+    }
+
+    /// Who the list says has children, by image name.
+    fn parents(sort_by: u16) -> Vec<String> {
+        let snap = machine();
+        let meta = MetaStore::new();
+        let mut tab = ProcessesTab::new();
+        tab.table.sort_by = sort_by;
+        tab.table.sort_desc = sort_by != C_NAME;
+        tab.rebuild(&snap, &meta, "");
+        tab.rows
+            .iter()
+            .filter(|r| r.has_children)
+            .filter_map(|r| match r.kind {
+                RowKind::Proc(i) => Some(snap.procs[i as usize].name.to_string()),
+                // The section headers are always expandable; they are not the
+                // parentage under test.
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The launcher rule is a fact about the process, not about the ordering, so
+    /// the shape of the tree cannot depend on which column is sorted.
+    ///
+    /// Sorting by name additionally splits the list into sections; that changes
+    /// what is *above* a row, never what hangs below it.
+    #[test]
+    fn only_a_real_owner_holds_children_whatever_the_sort() {
+        // `chrome.exe` and nothing else: `System`, `services.exe` and
+        // `explorer.exe` all launched what sits under them in the tree, and Task
+        // Manager lists those beside their launcher.
+        assert_eq!(parents(C_NAME), ["chrome.exe"]);
+        assert_eq!(parents(C_CPU), ["chrome.exe"]);
+    }
+
+    /// Every process is listed exactly once, in both modes: the top level is the
+    /// group heads, and a head never also appears under its launcher.
+    #[test]
+    fn every_process_is_listed_exactly_once() {
+        for sort_by in [C_NAME, C_CPU] {
+            let snap = machine();
+            let meta = MetaStore::new();
+            let mut tab = ProcessesTab::new();
+            tab.table.sort_by = sort_by;
+            // Expand everything expandable, so nothing is missing merely because
+            // it is folded away.
+            for p in &snap.procs {
+                tab.expanded.insert(p.key());
+            }
+            tab.rebuild(&snap, &meta, "");
+
+            let mut pids: Vec<u32> = tab
+                .rows
+                .iter()
+                .filter_map(|r| match r.kind {
+                    RowKind::Proc(i) => Some(snap.procs[i as usize].pid),
+                    _ => None,
+                })
+                .collect();
+            pids.sort_unstable();
+            assert_eq!(pids, [4, 100, 200, 500, 600, 700, 701], "sort {sort_by}");
+        }
+    }
+
+    const GB: u64 = 1024 * 1024 * 1024;
+
+    /// `machine()` with a memory reading on it: 10 GB physically in use, of which
+    /// the process rows own 3.
+    ///
+    /// `sub_private_ws` is set alongside `private_ws` because that is the field
+    /// the Memory column sorts and displays on; here nothing is nested under the
+    /// two that hold memory, so the subtree total is the process's own.
+    fn machine_with_memory() -> Snapshot {
+        let mut snap = machine();
+        snap.procs[0].private_ws = GB;
+        snap.procs[0].sub_private_ws = GB;
+        snap.procs[1].private_ws = 2 * GB;
+        snap.procs[1].sub_private_ws = 2 * GB;
+        snap.mem = MemStats {
+            total: 16 * GB,
+            available: 6 * GB,
+            in_use: 10 * GB,
+            paged_pool: GB,
+            nonpaged_pool: 2 * GB,
+            modified: GB / 2,
+            ..Default::default()
+        };
+        snap
+    }
+
+    /// The whole point of the section: its terms account for the difference
+    /// between what the rows own and what the header claims, exactly. A remainder
+    /// that merely narrowed the gap would leave a reader where they started.
+    #[test]
+    fn the_system_terms_close_the_gap_exactly() {
+        let snap = machine_with_memory();
+        let sys = SysMem::of(&snap);
+
+        let attributed: u64 = snap.procs.iter().map(|p| p.private_ws).sum();
+        assert_eq!(attributed, 3 * GB);
+        assert_eq!(sys.total, snap.mem.in_use - attributed);
+        assert_eq!(sys.shared + sys.kernel + sys.transit, sys.total);
+
+        assert_eq!(sys.kernel, 3 * GB);
+        assert_eq!(sys.transit, GB / 2);
+        // The remainder, which is where any error in the measured terms lands.
+        assert_eq!(sys.shared, 7 * GB - 3 * GB - GB / 2);
+    }
+
+    /// Physical use and the pool figures come from two different calls, so a
+    /// sample can catch them disagreeing -- a pool larger than the gap it is
+    /// meant to sit inside. The terms still have to add up rather than wrap
+    /// around into an 18-exabyte row.
+    #[test]
+    fn a_skewed_sample_cannot_underflow_the_remainder() {
+        let mut snap = machine_with_memory();
+        snap.mem.nonpaged_pool = 40 * GB;
+        let sys = SysMem::of(&snap);
+        assert_eq!(sys.shared + sys.kernel + sys.transit, sys.total);
+        assert_eq!(sys.kernel, sys.total);
+        assert_eq!(sys.transit, 0);
+        assert_eq!(sys.shared, 0);
+    }
+
+    /// Sorted by name the list is in sections, and the readings are one of them:
+    /// a header, its terms, and nothing after them.
+    ///
+    /// Nothing in it is a process, which is what leaves End task, the context menu
+    /// and the inspector with no target on those rows -- they all read `selected`,
+    /// and only a `Proc` row can set it.
+    #[test]
+    fn grouped_the_readings_are_a_section_of_their_own() {
+        let snap = machine_with_memory();
+        let meta = MetaStore::new();
+        let mut tab = ProcessesTab::new();
+        tab.rebuild(&snap, &meta, "");
+
+        let at = tab
+            .rows
+            .iter()
+            .position(|r| matches!(r.kind, RowKind::SysGroup))
+            .expect("no system section");
+        assert!(
+            tab.rows[at + 1..]
+                .iter()
+                .all(|r| matches!(r.kind, RowKind::Sys(_))),
+            "something follows the system section"
+        );
+        assert!(!tab.rows[at..]
+            .iter()
+            .any(|r| matches!(r.kind, RowKind::Proc(_))));
+        // Three terms: no GPU in this snapshot, so that one is left out.
+        assert_eq!(tab.rows[at + 1..].len(), 3);
+    }
+
+    /// Flat, the readings rank among the processes instead of after them. They are
+    /// routinely the largest entries in the Memory column, and a ranking that left
+    /// its biggest rows out of the ranking would be telling the reader something
+    /// false.
+    #[test]
+    fn flat_the_readings_rank_by_size_among_the_processes() {
+        let snap = machine_with_memory();
+        let sys = SysMem::of(&snap);
+        let meta = MetaStore::new();
+        let mut tab = ProcessesTab::new();
+        tab.table.sort_by = C_MEM;
+        tab.table.sort_desc = true;
+        tab.rebuild(&snap, &meta, "");
+
+        // No section header for anything, readings included.
+        assert!(!tab.rows.iter().any(|r| matches!(r.kind, RowKind::SysGroup)));
+
+        let sizes: Vec<u64> = tab
+            .rows
+            .iter()
+            .map(|r| match r.kind {
+                RowKind::Proc(i) => snap.procs[i as usize].sub_private_ws,
+                RowKind::Sys(kind) => kind.value(&sys),
+                RowKind::Group(_) | RowKind::SysGroup => {
+                    unreachable!("a flat list has no section headers")
+                }
+            })
+            .collect();
+        assert!(
+            sizes.windows(2).all(|w| w[0] >= w[1]),
+            "not ordered by size: {sizes:?}"
+        );
+
+        // Interleaved, not appended: shared (3.5G) and kernel (3G) outrank every
+        // process here, and the modified list (0.5G) lands between the 1 GB
+        // process and the ones holding nothing.
+        let sys_at: Vec<usize> = tab
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| matches!(r.kind, RowKind::Sys(_)))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(sys_at, [0, 1, 4], "sizes were {sizes:?}");
+    }
+
+    /// Holding Ctrl pins the order so a moving row can be clicked. The readings
+    /// have to hold still too -- they are keyed by [`SysRow`] rather than by
+    /// `ProcKey`, so they need their own remembered positions to do it.
+    #[test]
+    fn a_frozen_list_holds_the_readings_where_they_were() {
+        let mut snap = machine_with_memory();
+        let meta = MetaStore::new();
+        let mut tab = ProcessesTab::new();
+        tab.table.sort_by = C_MEM;
+        tab.table.sort_desc = true;
+        tab.rebuild(&snap, &meta, "");
+        let before: Vec<usize> = tab
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| matches!(r.kind, RowKind::Sys(_)))
+            .map(|(i, _)| i)
+            .collect();
+
+        // Freeze, then hand it a sample that would reorder everything: the two
+        // processes now dwarf every reading.
+        tab.frozen = true;
+        snap.procs[0].sub_private_ws = 9 * GB;
+        snap.procs[1].sub_private_ws = 8 * GB;
+        tab.rebuild(&snap, &meta, "");
+
+        let after: Vec<usize> = tab
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| matches!(r.kind, RowKind::Sys(_)))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(before, after);
+    }
+
+    /// Filtering narrows the list to matching processes, and those no longer add
+    /// up to the header total -- so the section that reconciles the two has
+    /// nothing to say, and showing it would read as one more search hit.
+    #[test]
+    fn filtering_hides_the_system_section() {
+        let snap = machine_with_memory();
+        let meta = MetaStore::new();
+        let mut tab = ProcessesTab::new();
+        tab.rebuild(&snap, &meta, "chrome");
+        assert!(!tab.rows.iter().any(|r| matches!(r.kind, RowKind::SysGroup)));
+    }
 
     /// Every title here was copied off a running process, separators included.
     /// The point of the test is that the separator is *not* the thing being
@@ -1040,11 +1771,11 @@ mod tests {
         // The app's own title carries a version; it comes along.
         assert_eq!(
             reorder(
-                r"yatm (Roaming\yatm) - File Pilot v0.7.0",
+                r"aztm (Roaming\aztm) - File Pilot v0.7.0",
                 Some("File Pilot"),
                 "FPilot.exe",
             ),
-            r"File Pilot v0.7.0 - yatm (Roaming\yatm)"
+            r"File Pilot v0.7.0 - aztm (Roaming\aztm)"
         );
     }
 

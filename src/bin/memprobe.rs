@@ -1,15 +1,15 @@
 //! Isolation probe: a bare eframe window with a single label.
 //!
 //! Used to separate the framework's baseline memory cost -- and, with
-//! `YATM_PROBE_SPIN=1`, its per-frame memory *growth* -- from this app's own.
-//! Renderer is chosen with `YATM_PROBE_RENDERER=wgpu|glow`.
+//! `AZTM_PROBE_SPIN=1`, its per-frame memory *growth* -- from this app's own.
+//! Renderer is chosen with `AZTM_PROBE_RENDERER=wgpu|glow`.
 //!
 //! Spinning matters because the leak being chased is per frame, not per second:
 //! comparing a repainting probe against the app gives bytes-per-frame for each,
 //! and that says whether the growth belongs to the framework or to us.
 
 fn main() -> eframe::Result<()> {
-    let use_glow = std::env::var("YATM_PROBE_RENDERER").as_deref() == Ok("glow");
+    let use_glow = std::env::var("AZTM_PROBE_RENDERER").as_deref() == Ok("glow");
 
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -25,27 +25,31 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
-    if !use_glow && std::env::var_os("YATM_PROBE_ALL_BACKENDS").is_none() {
+    // The same single backend and adapter the application pins, so the baseline this
+    // measures is the one the application actually pays. The backend comes from
+    // `azur_egui_theme::render` for that reason: a probe on a different backend
+    // measures a different framework.
+    if !use_glow && std::env::var_os("AZTM_PROBE_ALL_BACKENDS").is_none() {
         use eframe::wgpu;
         if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup
         {
-            setup.instance_descriptor.backends = wgpu::Backends::DX12;
+            setup.instance_descriptor.backends = azur_egui_theme::render::backends();
             setup.power_preference = wgpu::PowerPreference::LowPower;
         }
     }
 
-    let spin = std::env::var_os("YATM_PROBE_SPIN").is_some();
+    let spin = std::env::var_os("AZTM_PROBE_SPIN").is_some();
     // Number of text cells to paint per frame. A real table paints a few
     // hundred, and text is what dominates the vertex data egui uploads, so this
     // is the knob that decides whether growth follows submitted work.
-    let cells: usize = std::env::var("YATM_PROBE_CELLS")
+    let cells: usize = std::env::var("AZTM_PROBE_CELLS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
-    // `YATM_PROBE_JITTER=1` varies the cell count every frame, so the vertex
+    // `AZTM_PROBE_JITTER=1` varies the cell count every frame, so the vertex
     // buffer egui hands the driver is a different size each time. A fixed count
     // hands it the same size over and over, which is the case that stayed flat.
-    let jitter = std::env::var_os("YATM_PROBE_JITTER").is_some();
+    let jitter = std::env::var_os("AZTM_PROBE_JITTER").is_some();
 
     eframe::run_native(
         "memprobe",

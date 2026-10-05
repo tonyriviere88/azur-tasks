@@ -1,15 +1,17 @@
-<img src="assets/logo.png" alt="" width="104" align="right">
+<img src="assets/app-256.png" alt="" width="104" align="right">
 
-# Yet Another Task Manager
+# Azur Task Manager
 
 A Windows task manager built for low latency and a small footprint: process
 hierarchy, a full details grid, live performance graphs, services and startup
-entries. Dark theme, GPU-composited, event-driven.
+entries. GPU-composited, event-driven, and named for the design system it is
+built out of — Azur (`azur-egui-theme`, a sibling checkout) down to the title
+bar, the icon and the colour behind a busy cell.
 
 Measured against the real Windows Task Manager on the same machine while both
 sat idle (24 logical cores, 64 GB RAM, ~550 processes, ~9,300 threads):
 
-| | yatm | Windows Task Manager |
+| | Azur | Windows Task Manager |
 |---|---|---|
 | CPU at rest | **3.0 %** of one core | 20.6 % of one core |
 | Working set | **206 MB** | 238 MB |
@@ -21,7 +23,7 @@ sat idle (24 logical cores, 64 GB RAM, ~550 processes, ~9,300 threads):
 Binary is 10.7 MB with no runtime dependencies beyond what ships with Windows.
 
 Nearly all of the remaining CPU is the cost of *getting* the data, not showing
-it. Per one-second tick (`YATM_TRACE_SAMPLE=1`):
+it. Per one-second tick (`AZTM_TRACE_SAMPLE=1`):
 
 ```
 total 24.1 ms   procs 20.1   net 1.8   gpu 1.3   windows 0.5   mem 0.4
@@ -78,7 +80,7 @@ and only the varying case grows. The real app has hundreds of independently
 varying meshes, hence the far larger per-frame figure.
 
 So the trade is ~150 MB of extra steady footprint against a leak, and for a
-program left open all day that is not a close call. `YATM_RENDERER=glow` selects
+program left open all day that is not a close call. `AZTM_RENDERER=glow` selects
 OpenGL for a short session or a machine whose DX12 path misbehaves; it is
 genuinely lighter for the first ten minutes.
 
@@ -134,16 +136,30 @@ state and rate deltas would silently jump to an unrelated process.
 
 ## Tabs
 
-**Processes** — hierarchy in two sections, Apps and Background processes. A whole
-process tree is assigned to one section, so a browser's or editor's helper
-processes nest under the app rather than scattering into Background. Collapsed
-parents report their subtree's totals. CPU / memory / disk cells carry Task
-Manager's warm load tint. Elevated processes are marked.
+**Processes** — hierarchy in three sections: Apps, Background processes, and
+Suspended processes. A whole process tree is assigned to one section, so a browser's
+or editor's helper processes nest under the app rather than scattering into
+Background. Collapsed parents report their subtree's totals. Elevated processes are
+marked.
+
+Suspended is last, and being frozen outranks being an app. A suspended process
+consumes nothing and can do nothing, so a reader scanning for what is using the
+machine wants the whole lot of them out of the way at once rather than interleaved
+with the things that are running.
+
+CPU / memory / disk cells carry a magnitude tint in **that column's own series
+colour** — the violet of the memory trace behind a heavy memory cell, the green of
+the disk trace behind a heavy disk cell. Task Manager's scheme, which this used to
+copy, ramps amber into red for every column alike: it says *alarm* about a process
+doing nothing wrong, and it says the same thing about memory as about disk. Severity
+is the number's job, not the cell's. Nothing is tinted below 12% of full scale
+either, because a list where almost everything is coloured tells a reader nothing —
+the point is that the eye lands on the few rows that are actually busy.
 
 Two details that are deliberate rather than incidental:
 
 - **Grouping follows the sort.** Sorted by name (the default) the list is split
-  into Apps and Background processes; sorted by anything else it goes flat.
+  into its sections; sorted by anything else it goes flat.
   Section headers are only useful while the order inside them means something —
   sorted by CPU they cut the ranking in two and hide the busiest background
   process below a fold. There is no button for it because there is nothing to
@@ -171,6 +187,72 @@ network throughput, and GPU utilisation. Graphs keep 60 s of history in
 fixed-size ring buffers, and the grid is phase-locked to the sample cadence so
 it scrolls with the data.
 
+**Sensors** — 60 seconds of what the machine reports about itself, a trace per
+reading: CPU usage, clock, package temperature and package power; memory in use and
+committed; per-GPU usage, video memory, temperature, hotspot, fan, core clock and
+power; and every ACPI thermal zone the firmware publishes. Traces rather than dials,
+because
+a sensor's value only means something next to where it has just been — a package
+at 60 °C reads one way after a minute of idling and another thirty seconds into a
+build. None of it needs elevation. Temperatures come from the
+`Thermal Zone Information` counter set, the live CPU clock from
+`CallNtPowerInformation`, and each GPU's own readings from its vendor's library,
+loaded at run time and absent without that vendor's driver: **NVML** for NVIDIA,
+**Level Zero Sysman** for Intel, **ADL** for AMD. Each adapter is matched to a
+backend by PCI vendor id and position, never by name. A reading the machine does
+CPU package power comes from `\Energy Meter(*)\Power`, which is the Energy Metering
+Interface — on an Intel part that surfaces the RAPL rails, the same registers a
+power-monitoring tool reads through a kernel driver, published by Windows and readable
+by anyone. The package rail is the one reported: it is what the part's power limit
+applies to, and it is what "CPU power" means. On an AMD APU the same figure comes from
+ADL instead, along with the processor's temperature, because there the CPU and the
+graphics are one die and one sensor set covers both.
+
+A reading the machine does not have shows as "—" rather than as a dial at zero, and an
+adapter with no
+readings at all says which library it wanted and — when that library is installed
+and still answered nothing — that this is what happened, because "no such card"
+and "the interface is there and mute" call for different fixes.
+
+The *hotspot* is the exception to that rule: it appears only on hardware that
+publishes one, rather than as an empty card everywhere else. Temperature and fan are
+things every discrete board has and an integrated one honestly lacks, so "—" says
+something true about the hardware; a junction reading is an AMD feature, and an empty
+card would say something false.
+
+**Frame pacing** for whatever is in the foreground is the last section: FPS, mean frame
+time, the 99th-percentile FPS (the "1% low" — the rate the slowest one frame in a
+hundred arrives at) and a micro-stutter rate. The four go together on purpose: an
+average of 120 fps says nothing about whether the frames arrived evenly, the 1% low
+says whether the worst of them were bad, and the stutter rate catches judder that
+neither notices — alternating 8 ms and 16 ms intervals average out to a healthy-looking
+83 fps and look terrible.
+
+This one needs **administrator rights**, and that is a platform limit rather than a
+choice. A frame is a *present*, presents are published by the graphics providers, and
+reading another process's events means an ETW trace session — which Windows grants only
+to a caller holding `SeSystemProfilePrivilege`. There is no unelevated substitute: the
+performance counters publish GPU engine time and memory, never frames. Unelevated the
+section says so and shows four empty recesses rather than four zeros.
+
+Micro-stutter has no standard definition, so this one states its own: the share of
+frames whose interval differs from the one before it by more than a fifth of the
+window's median. A proportion rather than a fixed number of milliseconds, because
+"visibly late" scales with the frame rate — 2 ms is nothing at 30 Hz and a third of a
+frame at 144.
+
+The page is the reader's to arrange, and it is the one page in the app that is:
+drag a heading to move a section, drag a card to move it within its section,
+right-click for the list of what is switched on. A table's rows are all the same kind
+of thing, so sorting them says everything there is to say — a sensor page is a wall
+of unrelated numbers of which any given reader cares about four, and whose four is
+not something the app can know. It is all kept in `settings.ini`, keyed by *what each
+thing is* rather than by where it sits, so an arrangement survives a driver update, a
+second graphics card, or a firmware that renumbers its thermal zones. Anything the
+saved arrangement has never seen appears at the end of its group rather than not at
+all. `Reset layout`, in the same menu, puts everything back in the order the machine
+reports it.
+
 **Details** — flat grid, 33 columns (21 hidden by default, toggled from the
 header's right-click menu): working set, peak, commit, virtual size, paged and
 non-paged pool, page faults, handles, threads, base priority, architecture,
@@ -178,10 +260,15 @@ session, start time, cumulative and current I/O, CPU time, cycles, publisher,
 image path, command line.
 
 **Services** — all Win32 services with state, hosting PID and service group;
-right-click jumps to the hosting process.
+right-click jumps to the hosting process or opens the folder its image lives in.
 
 **Startup apps** — the `Run` keys and both Startup folders, showing where each
-entry comes from and whether Windows has it disabled.
+entry comes from and whether Windows has it disabled. Enable and disable write
+Explorer's own `StartupApproved` record, so nothing is deleted and the change is
+what Windows itself would have made; entries that apply to all users need
+administrator rights, and the error says so. Right-click also opens the folder the
+entry runs from — a `Run` value points at a program, a Startup-folder entry *is* a
+shortcut, so that one lands on the Startup folder with the shortcut selected.
 
 ## Controls
 
@@ -196,9 +283,14 @@ entry comes from and whether Windows has it disabled.
 | F5 | sample now (works while paused) |
 | Del | end the selected process |
 | Double-click a row | expand / collapse |
-| Right-click a row | end task, end tree, priority, go to details, open location, properties, copy |
+| Right-click a row | end task, end tree, go to details, open folder, properties, copy, and priority in a submenu |
+| Hover a row | every column of it, uncropped, in a 400px tooltip at the pointer — names in one measured column, each value on its label's baseline |
 | Right-click a header | choose which columns to show |
 | Drag a header edge | resize column; click to sort |
+| Drag a sensor card's title | move it within its section — the trace is not a handle |
+| Drag a sensor heading | move the whole section |
+| Right-click in Sensors | choose which sensors and sections to show; reset the layout |
+| Run as administrator | adds frame pacing for the foreground app; nothing else needs it |
 | Click the sidebar icon | collapse the rail to icons only |
 
 Ordering is frozen by *identity*, not row index: processes that appear during a
@@ -222,15 +314,16 @@ the slack. The bar is therefore always reserved rather than appearing when the
 row count crosses the overflow point, since a bar that comes and goes would shift
 the whole grid underneath a stationary header.
 
-The window goes down to 500×400. Below about 560px of toolbar the update-speed
-caption goes, then the per-tab buttons, then status-bar items drop off one pair at
-a time — dropping a whole pair reads as "no room for this", where letting it clip
-reads as a rendering fault.
+The window goes down to 500×400. The navigation rail collapses to 48px of icons,
+the filter box shrinks to 120px before anything else gives, the update-speed
+caption goes, and status-bar items then drop off one pair at a time — dropping a
+whole pair reads as "no room for this", where letting it clip reads as a rendering
+fault.
 
 ## Saved state
 
-`%APPDATA%\yatm\settings.ini`, flat `key=value` text, written at most once every
-two seconds and again on exit:
+`%APPDATA%\Azur Task Manager\settings.ini`, flat `key=value` text, written at
+most once every two seconds and again on exit:
 
 - window position and inner size (and whether it was maximized)
 - whether the navigation rail is collapsed
@@ -246,11 +339,22 @@ off-screen. The file is safe to delete; nothing in it is load-bearing.
 
 ```
 cargo build --release
-./target/release/yatm.exe
+./target/release/azur-task-manager.exe
+cargo deploy                    release build, then copy it to D:\Programs
+cargo deploy --profile fast     the iteration build, for once
 ```
 
 Requires a Windows SDK (for `ntdll.lib` / `dxgi.lib`) and the MSVC toolchain.
 No admin rights needed to run; elevation only widens what is visible.
+
+`cargo run` runs the application: the crate sets `default-run`, because the second
+binary — `memprobe`, below — would otherwise make cargo refuse to choose. That one
+is a measurement tool rather than part of the product, so it is behind a feature of
+its own and `cargo build` does not build it. Ask for it by name when it is needed:
+
+```
+cargo run --features memprobe --bin memprobe
+```
 
 For development use `cargo build --profile fast`, which is the release profile
 without `lto = "fat"` and `codegen-units = 1`. Those two make a *link* of the
@@ -259,11 +363,25 @@ whole dependency graph part of every build, on one core: a one-line change costs
 changes behaviour, so `fast` is what to iterate against and `release` is what to
 ship.
 
+`cargo deploy` builds and then copies the binary to `D:\Programs`, or to
+`$AZUR_DEPLOY_DIR`, or to a directory named on the command line. It is an alias for
+`run --release --example deploy`, because nothing in cargo will build and *then*
+copy — the work is [`azur_egui_theme::deploy`](../azur-egui-theme/src/deploy.rs),
+shared with the other Azur applications, and `examples/deploy.rs` here is one
+call. It copies nothing if the build failed, and it can replace a copy that is
+*running*: this is a window you leave open, so overwriting it would otherwise fail
+for sharing every time. `--profile fast` deploys the iteration build, which is worth
+knowing here specifically — those 130 seconds against 2.4 are the difference between
+watching a deploy and not.
+
+`--bin` in the helper is what keeps `memprobe` out of it: a deploy asks for the
+application by name rather than for whatever the profile directory happens to hold.
+
 Environment variables:
 
-- `YATM_RENDERER=glow` — use OpenGL instead of wgpu/DX12. Lighter to start with,
+- `AZTM_RENDERER=glow` — use OpenGL instead of wgpu/DX12. Lighter to start with,
   but it grows; see the renderer note above.
-- `YATM_TRACE_SAMPLE=1` — print per-phase sampler timings to stderr.
+- `AZTM_TRACE_SAMPLE=1` — print per-phase sampler timings to stderr.
 
 `cargo build --features memtrace` adds a counting global allocator and prints
 live heap bytes, allocation and frame counts, and the size of every long-lived
@@ -271,30 +389,64 @@ container once per sample. It costs two atomics per allocation, which is why it
 is a build-time opt-in. It is what proved the growth above was *not* on the Rust
 heap — live bytes sat at 10.8 MB while private bytes climbed — and so stopped a
 long search through this codebase for a leak that was never in it. The same build
-accepts `YATM_UI_LEVEL=0..3` and `YATM_NO_ICONS=1` to bisect the paint path.
+accepts `AZTM_UI_LEVEL=0..3` and `AZTM_NO_ICONS=1` to bisect the paint path.
 
-### The icon
+### The mark
 
-`assets/yatm.ico` holds nine images: 16, 20, 24, 32, 40, 48 and 64 px as
-uncompressed DIBs, 128 and 256 px as PNG. Each one is laid out for its own size
-rather than scaled down from a master — below 48 px the geometry is snapped to
-the pixel grid so bar edges land on whole pixels, and the grid lines and accent
-lift are dropped where they would only add mush. `tools/mklogo.ps1` regenerates
-it (Windows PowerShell 5.1, for GDI+):
+Three ascending columns standing on a rule, in `AZURE_70` on a `GRAY_2` plate.
+The artwork is **not authored here**: it comes from the design system, which draws
+the marks for its applications together so they read as a set —
+`azur-egui-theme/app-icons/task-manager/`, regenerated by `cargo run --example
+app_icons` in that checkout.
 
-```
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\mklogo.ps1 -Out assets
-```
+Both colours are palette values, so the desktop icon is in the same paint as the
+window it opens: `GRAY_2` is the dark theme's `bg.layer` and `AZURE_70` its
+`accent.mark`, at 6.6:1 against each other. The plate is only 1.1:1 against
+Windows 11's dark taskbar, which the design system states plainly as a choice
+rather than an oversight — on a dark taskbar the tile disappears and the icon
+reads as a blue mark floating there, the way a good many Windows 11 icons do. On
+a light one it is a deliberate dark tile at 16.6:1.
 
-`build.rs` turns that `.ico` into the linker's `.res` input itself. The format is
-a flat list of length-prefixed records — one `RT_ICON` per image plus an
+It exists in three forms, which is what `docs/icons.md` §12 asks for:
+
+| where | what it is | who supplies it |
+| --- | --- | --- |
+| Explorer, a pinned shortcut, Alt-Tab before launch | `assets/app.ico`, nine sizes, in the PE resources | `build.rs` |
+| the taskbar button of a running window | `assets/app-64.png`, decoded at startup | `ViewportBuilder::with_icon` |
+| this window's own title bar, 16 px, one theme colour | `marks::task_manager`, painted | `TitleBar::icon` |
+
+Miss the second and the taskbar button turns into egui's white `e` the moment the
+window opens. The third cannot drift from the first two, because `src/ui/marks.rs`
+is a **verbatim copy** of the design system's `marks.rs`: the mark is geometry on
+the 16-unit grid, the generator rasterises those primitives into the PNGs and the
+`.ico`, and `marks::paint` draws the same primitives with `Pen`. One set of
+coordinates, two media. Refreshing it is a copy; checking it is a `diff`.
+
+`build.rs` turns the `.ico` into the linker's `.res` input itself. The format is a
+flat list of length-prefixed records — one `RT_ICON` per image plus an
 `RT_GROUP_ICON` naming them — and MSVC `link` accepts a `.res` directly, so the
-build needs neither `rc.exe` nor a build-dependency tree. The same build script
-unpacks the 64 px DIB to raw RGBA for the window icon, because winit registers
-its window class with a null `hIcon`: without that the caption and Alt-Tab would
-fall back to Windows' generic application icon even though Explorer shows the
-embedded one. All nine sizes are verified to come back out of the built
-executable through `PrivateExtractIcons` at their exact dimensions.
+build needs neither `rc.exe` nor a build-dependency tree. All nine sizes are
+verified to come back out of the built executable through `PrivateExtractIcons`
+at their exact dimensions, which is worth checking rather than assuming here:
+every entry in the design system's `.ico` is PNG-compressed, and PNG icon entries
+are a Vista-era addition that the older shell paths predate.
+
+That is also why the window icon is a `.png` and not unpacked from the `.ico`.
+The build script has no PNG decoder — deliberately, it is 200 lines of byte
+layout with no dependencies — so it cannot read those entries; `eframe::icon_data`
+decodes the same 64 px image at startup instead, one indirection shorter. 64 of
+the nine because winit builds a single `HICON` and lets Windows scale it, and 64
+halves exactly to the taskbar's 32 and quarters exactly to the caption's 16. The
+mark has one-pixel detail at those sizes — the rule under the columns — so an
+exact reduction is worth more than a bigger source.
+
+It writes one more record: an `RT_VERSION` carrying `FileDescription`,
+`ProductName`, `CompanyName` and the version numbers. That is the other half of
+having a name on Windows — it is what Explorer's Description column, the shell
+property sheet and the real Task Manager's Name column read, and it is what
+`sys::meta` reads out of *every* executable to fill this program's own Name and
+Publisher columns. Without it this program was the one row in its own list that
+could not say what it was.
 
 ## Limitations
 
@@ -309,8 +461,48 @@ have:
   usefully readable from a normal process.
 - **No startup "impact" rating.** Windows derives it from ETW boot traces. The
   Startup tab reports each entry's source instead.
-- **Startup and Services are read-only.** Enabling/disabling startup entries and
-  starting/stopping services need elevation and SCM write rights.
+- **Services are read-only.** Starting and stopping them needs SCM write rights,
+  which means elevation.
+- **Startup entries take effect at the next sign-in.** Explorer reads
+  `StartupApproved` when it starts, and there is no way to ask it to re-read.
+  All-users entries live under `HKEY_LOCAL_MACHINE` and need elevation to change.
+- **Temperature and fan depend on the hardware.** ACPI thermal zones are whatever
+  the firmware chose to publish, under names only its vendor documents. A GPU's
+  temperature and fan come from its vendor's library, and an *integrated* GPU has
+  neither of its own: it shares the CPU package's temperature, and its fan belongs
+  to the embedded controller. Level Zero on an Intel iGPU therefore reports the
+  core clock and little else, which is what the tab shows.
+- **The AMD backend was written without a Radeon to try it on**, and it showed:
+  ADL reports `iVendorID` as the *decimal* number 1002, not the `0x1002` that PCI and
+  the rest of this app use, so the vendor filter matched nothing and every AMD machine
+  looked like a machine with no AMD card in it. Both encodings are accepted now, a
+  test pins it, and the adapter walk is exercised against a stand-in for the driver.
+  It has since run on real hardware. Structure sizes are pinned by `const` assertions
+  and every reading is range-checked before it is accepted, but which of the
+  individual PMLog sensors are *right* on which generation is still something only a
+  Radeon owner can confirm.
+- **Which event is a present was taken on trust, and has now been checked.**
+  `src/sys/frames.rs` keys on `Microsoft-Windows-DXGI` id 42 and
+  `Microsoft-Windows-DxgKrnl` id 184, which come from the providers' manifests rather
+  than from any header. `probes_the_frame_providers`, run elevated against a 144 Hz
+  display, resolved them through TDH and found exactly that: DXGI 42 is `Present/Start`
+  and DxgKrnl 184 is `Present/Info`, both reporting the same process at 141.6 events a
+  second out of the 82 event kinds the two providers emit between them. Nothing above
+  is a guess any more.
+
+  The redundancy stays, because a manifest is a Windows build's business and not ours:
+  both sources are counted per process and whichever saw more of that process's frames
+  is the one reported, so an id that changes meaning costs the other source's numbers
+  rather than all of them. To re-check on another machine:
+
+  ```
+  set AZTM_PROBE_SECS=8
+  cargo test --bin azur-task-manager probes_the_frame_providers -- --ignored --nocapture
+  ```
+
+  It prints every event kind the providers emit with the rate it implies for the
+  busiest process; the present is the one that matches the display against a pid you
+  recognise. It needs administrator rights, because so does the feature.
 - **GPU depends on PDH counters.** `GPU Engine` / `GPU Adapter Memory` are absent
   on some drivers and in many VMs; the GPU cards then simply do not appear.
   Adapter names and VRAM totals are joined by LUID from DXGI.
@@ -329,15 +521,14 @@ have:
 ## Layout
 
 ```
-build.rs              assets/yatm.ico -> linker .res + window-icon RGBA
-assets/
-  yatm.ico            nine sizes; the executable's icon
-  logo.png            512 px, for this README
-tools/
-  mklogo.ps1          draws the logo and writes both of the above
+build.rs              assets/app.ico -> linker .res (icon + version strings)
+assets/                 all three from azur-egui-theme/app-icons/task-manager
+  app.ico             nine sizes; the executable's icon
+  app-64.png          the running window's icon
+  app-256.png         for this README
 src/
   main.rs             entry point, renderer selection, restored geometry
-  app.rs              shell: nav rail, toolbar, status bar, action dispatch
+  app.rs              shell: Azur title bar, rail, command row, status bar, dispatch
   settings.rs         %APPDATA% key=value store, hand-parsed
   sys/                data acquisition — knows nothing about the UI
     nt.rs             NtQuerySystemInformation bindings + x64 layout assertions
@@ -346,14 +537,24 @@ src/
     meta.rs           two-stage per-process metadata (cheap on-thread, slow off)
     counters.rs       CPU / memory / static machine description
     disk.rs net.rs gpu.rs dxgi.rs
+    pdh.rs            the little of PDH the counters need, English paths
+    sensors.rs        thermal zones, CPU clock and power, and the GPU backends
+    nvml.rs           NVIDIA, via nvml.dll
+    level_zero.rs     Intel, via ze_loader.dll (Level Zero Sysman)
+    adl.rs            AMD, via atiadlxx.dll — see Limitations
+    etw.rs            a real-time trace session and its consumer (needs elevation)
+    frames.rs         the foreground app's frame pacing, from present events
     services.rs startup.rs icon.rs actions.rs windows_list.rs util.rs
   ui/
     table.rs          virtualized direct-painting table
     graph.rs          filled line graphs, sparklines, segmented bars
-    processes.rs details.rs performance.rs services.rs startup.rs
-    theme.rs fmt.rs icons.rs
+    processes.rs details.rs performance.rs sensors.rs services.rs startup.rs
+    theme.rs          the app's slice of the Azur theme: series colours, thresholds
+    marks.rs          the product mark; a verbatim copy from the design system
+    fmt.rs icons.rs
   memtrace.rs         counting allocator + paint-path bisect (--features memtrace)
   bin/memprobe.rs     bare-window probe used for the renderer measurements above
+                      (--features memprobe; not built by a plain `cargo build`)
 ```
 
 The `nt.rs` structures carry compile-time `offset_of!` assertions for every field

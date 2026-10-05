@@ -3,6 +3,7 @@
 use super::fmt;
 use super::table::{Align, Column, Table};
 use super::theme::Theme;
+use azur_egui_theme::components::{ContextMenu, Text, TextColor, TextVariant};
 use crate::sys::meta::MetaStore;
 use crate::sys::snapshot::{ProcKey, RunState, Snapshot};
 use crate::sys::util::format_filetime;
@@ -128,7 +129,6 @@ impl DetailsTab {
         // Columns past Description are off by default; they are available from
         // the header context menu, as in Task Manager.
         let mut table = Table::new(cols, C_CPU, true);
-        table.row_h = 24.0;
         for c in table.cols.iter_mut() {
             if matches!(
                 c.id,
@@ -272,10 +272,10 @@ impl DetailsTab {
                 // cell rects, which only cover the visible columns.
                 for (slot, &cid) in vis.iter().enumerate() {
                     match cid {
-                        C_NAME => rp.text(slot, &p.name, t.text, Align::Left),
+                        C_NAME => rp.text(slot, &p.name, t.text.primary, Align::Left),
                         C_PID => {
                             fmt::integer(&mut buf, p.pid as u64);
-                            rp.text_font(slot, &buf, t.text_dim, Align::Right, &t.fonts.mono);
+                            rp.text_font(slot, &buf, t.text.secondary, Align::Right, &t.fonts.mono);
                         }
                         C_STATUS => {
                             let s = match p.state {
@@ -283,145 +283,149 @@ impl DetailsTab {
                                 RunState::Suspended => "Suspended",
                             };
                             let c = match p.state {
-                                RunState::Running => t.text_faint,
-                                RunState::Suspended => t.warn,
+                                RunState::Running => t.text.tertiary,
+                                RunState::Suspended => t.status.warning,
                             };
                             rp.text(slot, s, c, Align::Left);
                         }
                         C_USER => rp.text(
                             slot,
                             m.as_ref().and_then(|m| m.user.as_deref()).unwrap_or("—"),
-                            t.text_dim,
+                            t.text.secondary,
                             Align::Left,
                         ),
                         C_CPU => {
-                            rp.heat(slot, p.cpu / 25.0);
+                            rp.heat(slot, p.cpu / 25.0, t.cpu);
                             fmt::percent(&mut buf, p.cpu);
                             rp.text(slot, &buf, t.load_text(p.cpu), Align::Right);
                         }
                         C_MEM => {
-                            rp.heat(slot, p.private_ws as f32 / (2.0 * 1024.0 * 1024.0 * 1024.0));
+                            rp.heat(
+                                slot,
+                                p.private_ws as f32 / (2.0 * 1024.0 * 1024.0 * 1024.0),
+                                t.mem,
+                            );
                             fmt::mem_mb(&mut buf, p.private_ws);
-                            rp.text(slot, &buf, t.text, Align::Right);
+                            rp.text(slot, &buf, t.text.primary, Align::Right);
                         }
                         C_PEAK => {
                             fmt::mem_mb(&mut buf, p.peak_ws);
-                            rp.text(slot, &buf, t.text_dim, Align::Right);
+                            rp.text(slot, &buf, t.text.secondary, Align::Right);
                         }
                         C_COMMIT => {
                             fmt::mem_mb(&mut buf, p.commit);
-                            rp.text(slot, &buf, t.text_dim, Align::Right);
+                            rp.text(slot, &buf, t.text.secondary, Align::Right);
                         }
                         C_WS => {
                             fmt::mem_mb(&mut buf, p.working_set);
-                            rp.text(slot, &buf, t.text_dim, Align::Right);
+                            rp.text(slot, &buf, t.text.secondary, Align::Right);
                         }
                         C_THREADS => {
                             fmt::integer(&mut buf, p.threads as u64);
-                            rp.text(slot, &buf, t.text_dim, Align::Right);
+                            rp.text(slot, &buf, t.text.secondary, Align::Right);
                         }
                         C_HANDLES => {
                             fmt::integer(&mut buf, p.handles as u64);
-                            rp.text(slot, &buf, t.text_dim, Align::Right);
+                            rp.text(slot, &buf, t.text.secondary, Align::Right);
                         }
                         C_PRIO => {
                             fmt::integer(&mut buf, p.base_priority as u64);
-                            rp.text(slot, &buf, t.text_dim, Align::Right);
+                            rp.text(slot, &buf, t.text.secondary, Align::Right);
                         }
                         C_ARCH => rp.text(
                             slot,
                             m.as_ref().map(|m| m.arch.label()).unwrap_or("—"),
-                            t.text_dim,
+                            t.text.secondary,
                             Align::Left,
                         ),
                         C_SESSION => {
                             fmt::integer(&mut buf, p.session as u64);
-                            rp.text(slot, &buf, t.text_faint, Align::Right);
+                            rp.text(slot, &buf, t.text.tertiary, Align::Right);
                         }
                         C_START => {
                             let s = format_filetime(p.create_time, true);
-                            rp.text_font(slot, &s, t.text_faint, Align::Left, &t.fonts.mono);
+                            rp.text_font(slot, &s, t.text.tertiary, Align::Left, &t.fonts.mono);
                         }
                         C_READ => {
                             fmt::bytes(&mut buf, p.io_read_total);
-                            rp.text(slot, &buf, t.text_faint, Align::Right);
+                            rp.text(slot, &buf, t.text.tertiary, Align::Right);
                         }
                         C_WRITE => {
                             fmt::bytes(&mut buf, p.io_write_total);
-                            rp.text(slot, &buf, t.text_faint, Align::Right);
+                            rp.text(slot, &buf, t.text.tertiary, Align::Right);
                         }
                         C_FAULTS => {
                             fmt::percent(&mut buf, p.hard_faults_per_s);
-                            rp.text(slot, &buf, t.text_faint, Align::Right);
+                            rp.text(slot, &buf, t.text.tertiary, Align::Right);
                         }
                         C_DESC => rp.text(
                             slot,
                             m.as_ref()
                                 .and_then(|m| m.description.as_deref())
                                 .unwrap_or("—"),
-                            t.text_dim,
+                            t.text.secondary,
                             Align::Left,
                         ),
                         C_PATH => rp.text(
                             slot,
                             m.as_ref().and_then(|m| m.path.as_deref()).unwrap_or("—"),
-                            t.text_faint,
+                            t.text.tertiary,
                             Align::Left,
                         ),
                         C_CMDLINE => rp.text_font(
                             slot,
                             m.as_ref().and_then(|m| m.cmdline.as_deref()).unwrap_or("—"),
-                            t.text_faint,
+                            t.text.tertiary,
                             Align::Left,
                             &t.fonts.mono,
                         ),
                         C_VIRT => {
                             fmt::mem_mb(&mut buf, p.virtual_size);
-                            rp.text(slot, &buf, t.text_faint, Align::Right);
+                            rp.text(slot, &buf, t.text.tertiary, Align::Right);
                         }
                         C_PAGED => {
                             fmt::bytes(&mut buf, p.paged_pool);
-                            rp.text(slot, &buf, t.text_faint, Align::Right);
+                            rp.text(slot, &buf, t.text.tertiary, Align::Right);
                         }
                         C_NPPOOL => {
                             fmt::bytes(&mut buf, p.nonpaged_pool);
-                            rp.text(slot, &buf, t.text_faint, Align::Right);
+                            rp.text(slot, &buf, t.text.tertiary, Align::Right);
                         }
                         C_PFAULTS => {
                             fmt::integer(&mut buf, p.page_faults as u64);
-                            rp.text(slot, &buf, t.text_faint, Align::Right);
+                            rp.text(slot, &buf, t.text.tertiary, Align::Right);
                         }
                         C_CPUTIME => {
                             fmt::cpu_time(&mut buf, p.cpu_time_100ns);
-                            rp.text_font(slot, &buf, t.text_dim, Align::Right, &t.fonts.mono);
+                            rp.text_font(slot, &buf, t.text.secondary, Align::Right, &t.fonts.mono);
                         }
                         C_IOREAD => {
                             fmt::rate_mbs(&mut buf, p.io_read_bps);
-                            rp.text(slot, &buf, t.text_faint, Align::Right);
+                            rp.text(slot, &buf, t.text.tertiary, Align::Right);
                         }
                         C_IOWRITE => {
                             fmt::rate_mbs(&mut buf, p.io_write_bps);
-                            rp.text(slot, &buf, t.text_faint, Align::Right);
+                            rp.text(slot, &buf, t.text.tertiary, Align::Right);
                         }
                         C_READ_OPS => {
                             fmt::integer(&mut buf, p.read_ops);
-                            rp.text(slot, &buf, t.text_faint, Align::Right);
+                            rp.text(slot, &buf, t.text.tertiary, Align::Right);
                         }
                         C_WRITE_OPS => {
                             fmt::integer(&mut buf, p.write_ops);
-                            rp.text(slot, &buf, t.text_faint, Align::Right);
+                            rp.text(slot, &buf, t.text.tertiary, Align::Right);
                         }
                         C_OTHER_OPS => {
                             fmt::integer(&mut buf, p.other_ops);
-                            rp.text(slot, &buf, t.text_faint, Align::Right);
+                            rp.text(slot, &buf, t.text.tertiary, Align::Right);
                         }
                         C_OTHER_BYTES => {
                             fmt::bytes(&mut buf, p.io_other_total);
-                            rp.text(slot, &buf, t.text_faint, Align::Right);
+                            rp.text(slot, &buf, t.text.tertiary, Align::Right);
                         }
                         C_CYCLES => {
                             fmt::integer(&mut buf, p.cycle_time);
-                            rp.text_font(slot, &buf, t.text_faint, Align::Right, &t.fonts.mono);
+                            rp.text_font(slot, &buf, t.text.tertiary, Align::Right, &t.fonts.mono);
                         }
                         _ => {}
                     }
@@ -438,6 +442,18 @@ impl DetailsTab {
             }
         }
 
+        // Up and down the list. The selection is a process key rather than a row,
+        // so the row it lands on has to be turned back into one -- otherwise the
+        // next sample, which rebuilds the order, would move the selection with the
+        // row index instead of keeping it on the process.
+        if let Some(r) = super::table::list_nav(ui, self.selected_row, order.len()) {
+            if let Some(&i) = order.get(r) {
+                self.selected = Some(snap.procs[i as usize].key());
+                self.selected_row = Some(r);
+                self.table.scroll_to_row = Some(r);
+            }
+        }
+
         let target = out
             .context_row
             .and_then(|r| order.get(r).copied())
@@ -449,7 +465,7 @@ impl DetailsTab {
 
         // Columns are picked by right-clicking the header, which every table
         // supports; this menu is only about the row under the cursor.
-        out.response.context_menu(|ui| match target {
+        ContextMenu::new(&out.response).show(&ui.ctx().clone(), |ui| match target {
             Some(i) => {
                 let p = &snap.procs[i as usize];
                 let key = p.key();
@@ -465,10 +481,10 @@ impl DetailsTab {
                 );
             }
             None => {
-                ui.label(
-                    egui::RichText::new("Right-click a column header to choose columns")
-                        .small()
-                        .color(t.text_faint),
+                ui.add(
+                    Text::new("Right-click a column header to choose columns")
+                        .variant(TextVariant::Caption)
+                        .color(TextColor::Tertiary),
                 );
             }
         });

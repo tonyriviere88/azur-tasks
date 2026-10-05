@@ -113,7 +113,7 @@ pub fn start_with_notify(
     };
 
     std::thread::Builder::new()
-        .name("yatm-sampler".into())
+        .name("aztm-sampler".into())
         .spawn(move || {
             let mut sampler = Sampler::new(meta);
             let mut pool: Vec<Arc<Snapshot>> = Vec::with_capacity(4);
@@ -186,6 +186,10 @@ struct Sampler {
     disk: DiskProbe,
     net: NetProbe,
     gpu: Option<GpuProbe>,
+    sensors: super::sensors::SensorProbe,
+    /// Absent when the trace session could not be started, which unelevated it never
+    /// can; the status inside it says why.
+    frames: super::frames::FrameMonitor,
     windows: WindowList,
 
     /// Carried across ticks; copied into each published snapshot.
@@ -217,10 +221,12 @@ impl Sampler {
             buf: nt::AlignedBuf::with_capacity(1 << 20),
             prev: FxHashMap::default(),
             live: FxHashSet::default(),
+            frames: super::frames::FrameMonitor::start(),
             cpu: CpuProbe::new(),
             disk: DiskProbe::new(),
             net: NetProbe::new(),
             gpu: GpuProbe::new(),
+            sensors: super::sensors::SensorProbe::new(),
             windows: WindowList::new(),
             hist: Default::default(),
             mem: MemStats::default(),
@@ -278,7 +284,7 @@ impl Sampler {
         out.generation = self.generation;
         out.interval = dt;
 
-        let trace = std::env::var_os("YATM_TRACE_SAMPLE").is_some();
+        let trace = std::env::var_os("AZTM_TRACE_SAMPLE").is_some();
         let mut mark = Instant::now();
         let mut timings: Vec<(&str, f32)> = Vec::new();
         macro_rules! phase {
@@ -304,6 +310,30 @@ impl Sampler {
             g.sample(&mut out.gpus);
         }
         phase!("gpu");
+        self.sensors.sample(&mut out.sensors);
+        // Read before the process table is built, so the pid can be named from it.
+        out.frames.status = self.frames.status();
+        out.frames.pid = super::frames::foreground_pid();
+        out.frames.stats = self.frames.stats(out.frames.pid);
+        phase!("frames");
+        // Pair each adapter with its vendor's readings once, here, so the UI and
+        // the history buffers cannot disagree about which GPU a temperature
+        // belongs to. Every backend enumerates only its own vendor's devices, in
+        // the same PCI order DXGI does, so the nth adapter of a vendor is that
+        // vendor's nth device.
+        let mut nth: FxHashMap<u32, u32> = FxHashMap::default();
+        for g in out.gpus.iter_mut() {
+            let ordinal = nth.entry(g.vendor).or_insert(0);
+            g.sensors = out
+                .sensors
+                .gpus
+                .iter()
+                .position(|s| s.vendor == g.vendor && s.ordinal == *ordinal)
+                .map(|i| i as u32)
+                .unwrap_or(super::snapshot::NO_SENSORS);
+            *ordinal += 1;
+        }
+        phase!("sensors");
 
         out.cpu_count = out.cpu.per_core.len().max(self.cpu_info.logical as usize);
         out.cpu_name = Arc::from(self.cpu_info.name.as_str());
@@ -324,6 +354,15 @@ impl Sampler {
         self.assign_groups(out);
         self.rollup(out);
         phase!("tree");
+
+        // Named from the table that was just built, rather than by opening the process
+        // again: the pid is already in there with its window title resolved.
+        out.frames.name = out
+            .procs
+            .iter()
+            .find(|p| p.pid == out.frames.pid)
+            .map(|p| Arc::clone(&p.name))
+            .unwrap_or_else(|| Arc::from(""));
 
         // --- history --------------------------------------------------------
         self.push_history(out);
@@ -458,7 +497,12 @@ impl Sampler {
             }
 
             let window_title = self.windows.title_for(pid);
-            let category = classify(pid, info.SessionId, window_title.is_some());
+            let category = classify(
+                pid,
+                info.SessionId,
+                window_title.is_some(),
+                state == RunState::Suspended,
+            );
 
             total_threads = total_threads.saturating_add(info.NumberOfThreads);
             total_handles = total_handles.saturating_add(info.HandleCount);
@@ -640,16 +684,28 @@ impl Sampler {
     /// childless while its helpers turned up separately under Background.
     ///
     /// A process heads its own group entry when it owns a window (so an app
-    /// launched from a shell still appears in Apps) or when it has no visible
-    /// parent. Everything else inherits its parent's group.
+    /// launched from a shell still appears in Apps), when it has no visible
+    /// parent, or when the process that started it is a [launcher](is_launcher)
+    /// rather than an owner. Everything else inherits its parent's group.
     fn assign_groups(&mut self, out: &mut Snapshot) {
+        let shell = self.windows.shell();
+
         // `order` is pre-order, so a parent's group is already final here.
         for &i in &self.order {
             let idx = i as usize;
             let parent = out.procs[idx].parent;
             let own = out.procs[idx].category;
 
-            let heads = parent == u32::MAX || own == Category::App;
+            // Apps and suspended processes head their own entries; a background
+            // process nests under whichever of those started it, unless that was a
+            // launcher. A suspended child of a running app moves to the Suspended
+            // section with its own subtree, which is the point of the section.
+            let heads = if parent == u32::MAX {
+                true
+            } else {
+                let p = &out.procs[parent as usize];
+                own != Category::Background || is_launcher(p.pid, p.session, shell)
+            };
             out.procs[idx].group_head = heads;
             out.procs[idx].group = if heads {
                 own
@@ -660,13 +716,21 @@ impl Sampler {
     }
 
     /// Sum each subtree into its root so a collapsed row shows the whole group.
+    ///
+    /// Along the edges the *list* draws, not every edge in the tree: a process that
+    /// heads its own entry is a row in its own right beside its launcher, so folding
+    /// the launcher must not claim its load. Otherwise the shell would carry the CPU
+    /// of everything the reader ever started -- and carry it into the sort key, which
+    /// is these totals, putting a row that displays 0.2% at the top of a list ordered
+    /// by CPU. Each total is complete before its edge is skipped, so a detached head
+    /// still reports its own subtree.
     fn rollup(&mut self, out: &mut Snapshot) {
         // `order` is pre-order, so walking it backwards visits every child
         // before its parent.
         for &i in self.order.iter().rev() {
             let idx = i as usize;
             let parent = out.procs[idx].parent;
-            if parent == u32::MAX {
+            if parent == u32::MAX || out.procs[idx].group_head {
                 continue;
             }
             let (c, m, d, n) = {
@@ -712,6 +776,66 @@ impl Sampler {
         for (h, g) in self.hist.gpu.iter_mut().zip(out.gpus.iter()) {
             h.push(g.utilization);
         }
+
+        // Sensors. A reading the hardware does not have pushes a zero: the graph
+        // has to advance for every other series to stay aligned in time, and the
+        // tile above it shows "—" rather than the flat line.
+        self.hist
+            .cpu_temp
+            .push(out.sensors.cpu_temp_c.unwrap_or(0.0));
+        self.hist.cpu_clock.push(out.sensors.cpu_mhz as f32);
+        self.hist
+            .cpu_power
+            .push(out.sensors.cpu_power_w.unwrap_or(0.0));
+        // Frame pacing follows whatever is in front, so the process it is about can
+        // change between one tick and the next. The histories are of *the foreground*
+        // rather than of one application, which is what a reader watching a game while
+        // alt-tabbing to look at this expects.
+        self.hist.fps.push(out.frames.stats.map_or(0.0, |s| s.fps));
+        self.hist
+            .frametime
+            .push(out.frames.stats.map_or(0.0, |s| s.avg_ms));
+        self.hist
+            .stutter
+            .push(out.frames.stats.map_or(0.0, |s| s.stutter_pct));
+        self.hist.mem_commit.push(if out.mem.commit_limit > 0 {
+            out.mem.committed as f32 / out.mem.commit_limit as f32 * 100.0
+        } else {
+            0.0
+        });
+
+        resize_hist(&mut self.hist.zone_temp, out.sensors.zones.len());
+        for (h, z) in self.hist.zone_temp.iter_mut().zip(out.sensors.zones.iter()) {
+            h.push(z.celsius);
+        }
+
+        for h in [
+            &mut self.hist.gpu_temp,
+            &mut self.hist.gpu_hotspot,
+            &mut self.hist.gpu_clock,
+            &mut self.hist.gpu_power,
+            &mut self.hist.gpu_fan,
+            &mut self.hist.gpu_mem,
+        ] {
+            resize_hist(h, out.gpus.len());
+        }
+        for (i, g) in out.gpus.iter().enumerate() {
+            let s = out.sensors.gpus.get(g.sensors as usize);
+            let take = |v: Option<f32>| v.unwrap_or(0.0);
+            self.hist.gpu_temp[i].push(take(s.and_then(|s| s.temp_c)));
+            self.hist.gpu_hotspot[i].push(take(s.and_then(|s| s.hotspot_c)));
+            self.hist.gpu_clock[i].push(take(s.and_then(|s| s.core_mhz.map(|m| m as f32))));
+            self.hist.gpu_power[i].push(take(s.and_then(|s| s.power_w)));
+            self.hist.gpu_fan[i].push(take(s.and_then(|s| s.fan_pct)));
+            // Whichever pool this adapter actually uses -- an integrated one has
+            // no dedicated memory, and its allocation is in system RAM.
+            let vram = match s {
+                Some(s) if s.vram_used > 0 && g.shared_used <= g.dedicated_used => s.vram_used,
+                _ if g.shared_used > g.dedicated_used => g.shared_used,
+                _ => g.dedicated_used,
+            };
+            self.hist.gpu_mem[i].push(vram as f32);
+        }
     }
 }
 
@@ -721,20 +845,90 @@ fn resize_hist(v: &mut Vec<History>, n: usize) {
     }
 }
 
-/// App or background.
+/// App, background, or suspended.
 ///
 /// Owning a visible top-level window is what makes a process an app; everything
 /// else is background. The image's location used to matter here, to split
 /// "Windows processes" out of "Background processes", and no longer does.
-fn classify(pid: u32, session: u32, has_window: bool) -> Category {
+///
+/// Being suspended outranks both, including for a process that owns a window: a
+/// frozen app is not one of the things using the machine, and leaving it in Apps
+/// means a reader looking for what is busy has to read past it.
+fn classify(pid: u32, session: u32, has_window: bool, suspended: bool) -> Category {
     // PID 0 and 4 are the idle process and the kernel. Session 0 is the
     // services session, so never a user-facing app however it looks.
     if pid == 0 || pid == 4 || session == 0 {
-        return Category::Background;
+        // ...but a suspended service host is still worth setting aside.
+        return if suspended {
+            Category::Suspended
+        } else {
+            Category::Background
+        };
     }
-    if has_window {
+    if suspended {
+        Category::Suspended
+    } else if has_window {
         Category::App
     } else {
         Category::Background
+    }
+}
+
+/// Did this process merely *start* the ones below it, rather than own them?
+///
+/// `InheritedFromUniqueProcessId` records who called `CreateProcess`, and on Windows
+/// that is usually a launcher acting on someone else's behalf: the shell starts
+/// everything the reader double-clicks, the service manager starts every service,
+/// `wininit` starts the service manager, and the DCOM launcher starts every COM and
+/// UWP activation -- `RuntimeBroker`, `dllhost`, `WmiPrvSE`. It is not even reliably
+/// "who started me": a caller can name any process as the parent of its child with
+/// `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`.
+///
+/// So a tree drawn straight from the parent field files most of the machine under
+/// two or three nodes that say nothing about it -- here, 170 processes under the
+/// service manager and 41 under one `svchost`. Task Manager does not: its rows come
+/// from *task* identity (a window, a package, a service the SCM reports), which is
+/// why the children of `explorer.exe`, `wininit.exe` and `services.exe` sit at the
+/// same level as their launcher rather than under it. This is that rule, expressed
+/// as the two tests that make it hold without a list of image names:
+///
+/// - **Session 0 has no user in it.** Everything there is infrastructure, so a
+///   session-0 parent is a launcher whatever its image -- and that covers the
+///   service manager, `wininit`, the COM surrogate hosts, and the kernel.
+/// - **The shell** is identified by pid, from `GetShellWindow` -- see
+///   [`shell`](super::windows_list::WindowList::shell).
+///
+/// Ownership survives both: a browser, an editor or a terminal in a user session is
+/// none of these, so its helpers still nest under it, which is what the grouped list
+/// is for.
+fn is_launcher(pid: u32, session: u32, shell: u32) -> bool {
+    session == 0 || (shell != 0 && pid == shell)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_launcher;
+
+    /// The two tests that stand in for Task Manager's list of "Windows processes".
+    #[test]
+    fn a_launcher_is_the_shell_or_anything_in_session_0() {
+        const SHELL: u32 = 4321;
+
+        // The service manager, `wininit`, a COM surrogate host: session 0 is
+        // infrastructure whatever pid it wears.
+        assert!(is_launcher(2468, 0, SHELL));
+        assert!(is_launcher(4, 0, SHELL), "the kernel parents smss");
+
+        // The shell, by pid rather than by image name.
+        assert!(is_launcher(SHELL, 1, SHELL));
+
+        // An ordinary process in a user session owns what it starts: a browser's
+        // renderers and an editor's language servers belong under them.
+        assert!(!is_launcher(1234, 1, SHELL));
+
+        // No shell reported -- a session that has none, or one whose shell has just
+        // died. Nothing matches, rather than everything matching pid 0.
+        assert!(!is_launcher(0, 1, 0));
+        assert!(!is_launcher(SHELL, 1, 0));
     }
 }

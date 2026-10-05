@@ -2,6 +2,8 @@
 
 use super::table::{Align, Column, Table};
 use super::theme::Theme;
+use super::Action;
+use azur_egui_theme::components::{menu_divider, ContextMenu, MenuItem, Text, TextColor, TextVariant};
 use crate::sys::startup::{self, StartupEntry};
 use egui::{Id, Ui};
 use std::time::{Duration, Instant};
@@ -19,6 +21,10 @@ pub struct StartupTab {
     last_refresh: Option<Instant>,
     built_filter: String,
     dirty: bool,
+    /// The folder-opening target for the row the context menu is on, resolved when
+    /// the menu opens rather than on every frame it stays open: working out which
+    /// part of a command line is the program means looking on disk.
+    menu_path: Option<String>,
 }
 
 impl StartupTab {
@@ -30,8 +36,7 @@ impl StartupTab {
                 .help("Where Windows reads this entry from"),
             Column::new(C_CMD, "Command", 520.0, Align::Left),
         ];
-        let mut table = Table::new(cols, C_NAME, false);
-        table.row_h = 24.0;
+        let table = Table::new(cols, C_NAME, false);
         Self {
             table,
             entries: Vec::new(),
@@ -40,6 +45,7 @@ impl StartupTab {
             last_refresh: None,
             built_filter: String::new(),
             dirty: true,
+            menu_path: None,
         }
     }
 
@@ -83,7 +89,7 @@ impl StartupTab {
         }
     }
 
-    pub fn ui(&mut self, ui: &mut Ui, t: &Theme, filter: &str) {
+    pub fn ui(&mut self, ui: &mut Ui, t: &Theme, filter: &str, action: &mut Option<Action>) {
         self.maybe_refresh();
         if self.dirty || self.built_filter != filter {
             self.rebuild(filter);
@@ -114,24 +120,24 @@ impl StartupTab {
                 let e = &entries[order[rp.row] as usize];
                 for (slot, &cid) in vis.iter().enumerate() {
                     match cid {
-                        C_NAME => rp.text(slot, &e.name, t.text, Align::Left),
+                        C_NAME => rp.text(slot, &e.name, t.text.primary, Align::Left),
                         C_STATE => {
                             let (fg, bg, label) = if e.enabled {
-                                (t.ok, t.ok.gamma_multiply(0.18), "Enabled")
+                                (t.status.success, t.status.success.gamma_multiply(0.18), "Enabled")
                             } else {
                                 (
-                                    t.text_faint,
-                                    t.text_faint.gamma_multiply(0.14),
+                                    t.text.tertiary,
+                                    t.text.tertiary.gamma_multiply(0.14),
                                     "Disabled",
                                 )
                             };
                             rp.pill(slot, label, fg, bg);
                         }
-                        C_SOURCE => rp.text(slot, e.source.label(), t.text_dim, Align::Left),
+                        C_SOURCE => rp.text(slot, e.source.label(), t.text.secondary, Align::Left),
                         C_CMD => rp.text_font(
                             slot,
                             &e.command,
-                            t.text_faint,
+                            t.text.tertiary,
                             Align::Left,
                             &t.fonts.mono,
                         ),
@@ -145,24 +151,100 @@ impl StartupTab {
         if let Some(r) = out.clicked_row.or(out.context_row) {
             self.selected = Some(r);
         }
+        if let Some(r) = super::table::list_nav(ui, self.selected, order.len()) {
+            self.selected = Some(r);
+            self.table.scroll_to_row = Some(r);
+        }
+        // Double-click toggles, like flipping a switch in a list of switches.
+        if let Some(r) = out.double_clicked_row {
+            if let Some(e) = self.entry_at(&order, r) {
+                *action = Some(Action::SetStartupEnabled {
+                    entry: Box::new(e.clone()),
+                    enable: !e.enabled,
+                });
+            }
+        }
 
-        out.response.context_menu(|ui| {
-            if ui.button("Refresh now").clicked() {
+        let target = self
+            .selected
+            .and_then(|r| self.entry_at(&order, r))
+            .cloned();
+
+        // Cleared as well as set: a right-click on the empty space below the rows
+        // opens the menu with no row under it, and last time's path must not
+        // outlive the row it came from.
+        if out.response.secondary_clicked() {
+            self.menu_path = out
+                .context_row
+                .and_then(|r| self.entry_at(&order, r))
+                .and_then(|e| crate::sys::actions::executable_of(&e.command));
+        }
+        let menu_path = self.menu_path.clone();
+
+        ContextMenu::new(&out.response).show(&ui.ctx().clone(), |ui| {
+            if let Some(e) = &target {
+                ui.add(
+                    Text::new(super::fmt::elide(&e.name, 40).into_owned())
+                        .variant(TextVariant::Caption)
+                        .color(TextColor::Secondary),
+                );
+                menu_divider(ui);
+                let label = if e.enabled { "Disable" } else { "Enable" };
+                let item = ui.add(MenuItem::new(label));
+                let item = if e.source.needs_admin() {
+                    item.on_hover_text("Needs administrator rights: this entry applies to all users")
+                } else {
+                    item
+                };
+                if item.clicked() {
+                    *action = Some(Action::SetStartupEnabled {
+                        entry: Box::new(e.clone()),
+                        enable: !e.enabled,
+                    });
+                    ui.close();
+                }
+                // A shortcut in the Startup folder *is* the item, so this lands on
+                // the Startup folder with it selected; a `Run` value points at a
+                // program, so it lands where the program lives.
+                let item = ui.add_enabled(menu_path.is_some(), MenuItem::new("Open folder"));
+                if item.clicked() {
+                    if let Some(p) = &menu_path {
+                        *action = Some(Action::OpenFileLocation { path: p.clone() });
+                    }
+                    ui.close();
+                }
+                if menu_path.is_none() {
+                    item.on_hover_text(
+                        "Nothing on disk matches this command, so there is no folder to open",
+                    );
+                }
+                menu_divider(ui);
+            }
+            if ui.add(MenuItem::new("Refresh now")).clicked() {
                 self.last_refresh = None;
                 ui.close();
             }
-            ui.separator();
-            ui.label(
-                egui::RichText::new(
-                    "Enabling or disabling startup entries is not implemented;\n\
-                     this tab is read-only.",
-                )
-                .small()
-                .color(t.text_faint),
-            );
         });
 
         self.order = order;
+    }
+
+    /// The entry a visible row stands for.
+    ///
+    /// Takes `order` as an argument because the row callback runs while it is
+    /// moved out of `self`.
+    fn entry_at(&self, order: &[u32], row: usize) -> Option<&StartupEntry> {
+        order.get(row).and_then(|i| self.entries.get(*i as usize))
+    }
+
+    /// The selected entry, for the toolbar's Enable/Disable button.
+    pub fn selected_entry(&self) -> Option<&StartupEntry> {
+        self.selected.and_then(|r| self.entry_at(&self.order, r))
+    }
+
+    /// Forget the cached enumeration, so the next frame reads the registry again.
+    pub fn invalidate(&mut self) {
+        self.last_refresh = None;
     }
 
     pub fn count(&self) -> (usize, usize) {

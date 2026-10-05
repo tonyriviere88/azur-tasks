@@ -1,6 +1,8 @@
 // Detach from the console so launching from Explorer does not flash a window.
-// A debug build keeps the console so panics and logging stay visible.
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// `build.rs` sets `gui_subsystem` for a release build (and for anything that
+// inherits it, such as `--profile fast`); a dev build keeps its console so panics
+// and logging stay visible.
+#![cfg_attr(gui_subsystem, windows_subsystem = "windows")]
 
 mod app;
 #[cfg(feature = "memtrace")]
@@ -13,61 +15,55 @@ mod ui;
 #[global_allocator]
 static ALLOC: memtrace::Counting = memtrace::Counting;
 
-/// The window icon, unpacked from `assets/yatm.ico` by `build.rs`.
+/// The window icon, from the design system's mark for this application.
 ///
-/// The `.ico` embedded in the executable is what Explorer and the taskbar read,
-/// but winit registers its window class with a null `hIcon`, so the caption and
-/// Alt-Tab icons have to be set from pixels at runtime. winit turns these into a
-/// single `HICON` at the source resolution and lets Windows scale it, so this is
-/// deliberately the largest uncompressed entry: 64px halves exactly to the 32px
-/// the taskbar wants and quarters exactly to the 16px in the title bar.
-mod icon {
-    include!(concat!(env!("OUT_DIR"), "/icon.rs"));
-}
+/// The `.ico` in the executable's resources is what Explorer and a pinned shortcut
+/// read, but winit registers its window class with a null `hIcon`, so the taskbar
+/// button and Alt-Tab entry of a *running* window have to be handed pixels. Miss
+/// this and they switch to egui's white `e` the moment the window opens.
+///
+/// 64px of the nine the design system generates: winit makes one `HICON` at the
+/// source resolution and lets Windows scale it, and 64 halves exactly to the 32
+/// the taskbar asks for and quarters exactly to the 16 in the caption. The mark has
+/// pixel-level detail at those sizes — a rule one pixel thick under the columns —
+/// so an exact reduction is worth more here than a larger source would be.
+const WINDOW_ICON: &[u8] = include_bytes!("../assets/app-64.png");
 
-/// Restrict wgpu to a single backend and the integrated adapter, and ask its
-/// allocator to favour memory over throughput.
+/// The graphics configuration, which this program no longer decides.
 ///
-/// By default wgpu enumerates every backend it was built with, which on Windows
-/// means loading the DX12, Vulkan *and* OpenGL driver stacks just to pick one.
-/// Each of those maps a substantial amount of driver memory into the process.
-/// A task manager draws flat rectangles and text, so it asks for the least
-/// capable path that works: DX12 only, on the low-power adapter, which also
-/// keeps a discrete GPU from spinning up just to host this window.
+/// All of it — the single backend, the adapter, and the allocator asked to favour
+/// memory over throughput — is [`azur_egui_theme::render`]'s, because all three
+/// decide whether a rule one pixel thick arrives one pixel thick, and this window
+/// draws one under its columns. Restricting wgpu to a single backend still matters
+/// for the reason it always did: left to itself it loads the DX12, Vulkan *and*
+/// OpenGL driver stacks just to pick one, and each maps a substantial amount of
+/// driver memory into the process.
+///
+/// What this program used to set, and what measuring it said:
+///
+/// | | private bytes | working set | threads |
+/// | --- | --- | --- | --- |
+/// | DX12, integrated adapter | 292.1 MB | 263.4 MB | 24 |
+/// | Vulkan, integrated adapter | 187.3 MB | 220.2 MB | 19 |
+/// | **Vulkan, discrete adapter** | **319.4 MB** | **304.9 MB** | **34** |
+///
+/// DX12 was pinned here as the cheapest path for flat rectangles and was not even
+/// that — Vulkan on the same adapter is 105 MB lighter. The integrated adapter is
+/// lighter again, and is *not* what this now uses: rendering there while the display
+/// hangs off the discrete GPU sends every frame across adapters to be presented, and
+/// whether that is lossless is a property of how a machine is wired rather than
+/// something to assume. The library documents both, and `AZUR_ADAPTER=low` takes the
+/// 131 MB back on a machine where it has been checked.
+///
+/// Checked rather than assumed, on either adapter: the 1px rules under the column
+/// headers keep their whole contrast in one row, measured at a leak of 0.000.
 fn wgpu_config() -> eframe::egui_wgpu::WgpuConfiguration {
-    use eframe::wgpu;
-
-    let mut cfg = eframe::egui_wgpu::WgpuConfiguration::default();
-    if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut cfg.wgpu_setup {
-        setup.instance_descriptor.backends = wgpu::Backends::DX12;
-        setup.power_preference = wgpu::PowerPreference::LowPower;
-
-        // wgpu's default allocator sub-allocates in large blocks to keep
-        // allocation off the hot path. This UI uploads a few hundred kilobytes
-        // of vertices a second, so the throughput that buys is irrelevant and
-        // the blocks are pure footprint.
-        setup.device_descriptor = std::sync::Arc::new(|adapter: &wgpu::Adapter| {
-            let base = if adapter.get_info().backend == wgpu::Backend::Gl {
-                wgpu::Limits::downlevel_webgl2_defaults()
-            } else {
-                wgpu::Limits::default()
-            };
-            wgpu::DeviceDescriptor {
-                label: Some("yatm"),
-                required_limits: wgpu::Limits {
-                    max_texture_dimension_2d: 8192,
-                    ..base
-                },
-                memory_hints: wgpu::MemoryHints::MemoryUsage,
-                ..Default::default()
-            }
-        });
-    }
-    cfg
+    azur_egui_theme::render::wgpu_options()
 }
 
 fn main() -> eframe::Result<()> {
-    // Default to wgpu/DX12, despite OpenGL starting ~180 MB lighter.
+    // Default to wgpu, despite OpenGL starting ~180 MB lighter. See `wgpu_config`
+    // for which backend, and why that part is not decided here.
     //
     // OpenGL starts smaller and then grows without bound: the driver keeps a
     // buffer allocation per distinct `glBufferData` size, egui_glow uploads one
@@ -79,25 +75,32 @@ fn main() -> eframe::Result<()> {
     // volume or on anything in this codebase.
     //
     // wgpu is flat. For a program left open all day that beats a smaller start,
-    // so this trades ~150 MB of steady footprint for a leak. `YATM_RENDERER=glow`
-    // picks OpenGL for a short session or a machine where DX12 misbehaves.
-    let use_wgpu = std::env::var("YATM_RENDERER").as_deref() != Ok("glow");
+    // so this trades ~150 MB of steady footprint for a leak. `AZTM_RENDERER=glow`
+    // picks OpenGL for a short session or a machine where wgpu will not start;
+    // `AZUR_BACKEND` changes backend without leaving wgpu.
+    let use_wgpu = std::env::var("AZTM_RENDERER").as_deref() != Ok("glow");
 
     let settings = settings::Settings::load();
 
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([1320.0, 840.0])
+        .with_inner_size([800.0, 850.0])
         // Small enough to park beside something else. The toolbar sheds its
         // caption and the rail collapses to icons, so this stays usable rather
         // than merely permitted.
         .with_min_inner_size([500.0, 400.0])
-        .with_title("Yet Another Task Manager")
-        .with_app_id("yatm")
-        .with_icon(egui::IconData {
-            rgba: icon::RGBA.to_vec(),
-            width: icon::SIZE,
-            height: icon::SIZE,
-        });
+        .with_title("Azur Task Manager")
+        .with_app_id("aztm")
+        // The window draws Azur's own `TitleBar`, so it asks the platform not to
+        // draw a second one. The frame keeps its shadow and its resize borders;
+        // only the caption is ours.
+        .with_decorations(false)
+        // `expect` on an asset compiled into the binary: it can only fail if the
+        // PNG in the repository is corrupt or `image` lost its `png` feature, and
+        // both are build faults that should be loud rather than a window that
+        // quietly wears egui's icon instead of this application's.
+        .with_icon(
+            eframe::icon_data::from_png_bytes(WINDOW_ICON).expect("assets/app-64.png is not a PNG"),
+        );
 
     // Restore where the window was. `window_rect` returns `None` for anything
     // implausible -- a size below the minimum, or a position from a monitor that
@@ -130,7 +133,7 @@ fn main() -> eframe::Result<()> {
     };
 
     eframe::run_native(
-        "Yet Another Task Manager",
+        "Azur Task Manager",
         options,
         Box::new(move |cc| Ok(Box::new(app::App::new(cc, settings)))),
     )

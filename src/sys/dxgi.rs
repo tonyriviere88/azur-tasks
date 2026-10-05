@@ -67,6 +67,8 @@ pub struct Adapter {
     /// `(high as u64) << 32 | low`, matching the key built from PDH instances.
     pub luid: u64,
     pub name: String,
+    /// PCI vendor id: which sensor interface, if any, can speak for this adapter.
+    pub vendor_id: u32,
     pub dedicated_video_memory: u64,
     pub is_software: bool,
 }
@@ -133,6 +135,7 @@ pub fn enumerate() -> Vec<Adapter> {
             out.push(Adapter {
                 luid,
                 name,
+                vendor_id: desc.vendor_id,
                 dedicated_video_memory: desc.dedicated_video_memory as u64,
                 is_software: desc.flags & ADAPTER_FLAG_SOFTWARE != 0,
             });

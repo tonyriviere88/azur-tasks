@@ -99,12 +99,12 @@ impl<'a> Graph<'a> {
                 / (HISTORY_LEN / self.grid_cols) as f32;
             let mut x = rect.right() - phase * step;
             while x > rect.left() {
-                painter.vline(x, rect.y_range(), Stroke::new(1.0, t.grid));
+                painter.vline(x, rect.y_range(), Stroke::new(1.0, t.stroke.subtle));
                 x -= step;
             }
             for i in 1..self.grid_rows {
                 let y = rect.top() + rect.height() * i as f32 / self.grid_rows as f32;
-                painter.hline(rect.x_range(), y, Stroke::new(1.0, t.grid));
+                painter.hline(rect.x_range(), y, Stroke::new(1.0, t.stroke.subtle));
             }
         }
 
@@ -138,7 +138,7 @@ impl<'a> Graph<'a> {
         painter.rect_stroke(
             rect,
             CornerRadius::ZERO,
-            Stroke::new(1.0, t.border),
+            Stroke::new(1.0, t.stroke.default),
             StrokeKind::Inside,
         );
         max
@@ -190,7 +190,7 @@ pub fn sparkline(
     border: bool,
 ) {
     let painter = ui.painter().with_clip_rect(rect);
-    painter.rect_filled(rect, CornerRadius::ZERO, t.plot_bg);
+    painter.rect_filled(rect, CornerRadius::ZERO, t.bg.canvas);
 
     let n = hist.len();
     if n >= 2 {
@@ -210,7 +210,7 @@ pub fn sparkline(
         painter.rect_stroke(
             rect,
             CornerRadius::ZERO,
-            Stroke::new(1.0, t.border_soft),
+            Stroke::new(1.0, t.stroke.subtle),
             StrokeKind::Inside,
         );
     }
@@ -220,7 +220,7 @@ pub fn sparkline(
 /// composition strip.
 pub fn segmented_bar(ui: &Ui, t: &Theme, rect: Rect, segments: &[(f32, Color32)]) {
     let painter = ui.painter();
-    painter.rect_filled(rect, t.radius_sm, t.plot_bg);
+    painter.rect_filled(rect, t.radius_sm, t.bg.canvas);
 
     let total: f32 = segments.iter().map(|(v, _)| *v).sum();
     if total <= 0.0 {
@@ -260,7 +260,7 @@ pub fn segmented_bar(ui: &Ui, t: &Theme, rect: Rect, segments: &[(f32, Color32)]
     painter.rect_stroke(
         rect,
         t.radius_sm,
-        Stroke::new(1.0, t.border),
+        Stroke::new(1.0, t.stroke.default),
         StrokeKind::Inside,
     );
 }

@@ -4,6 +4,9 @@
 use super::fmt;
 use super::graph::{self, Graph, Scale, Series};
 use super::theme::Theme;
+use azur_egui_theme::components::Tabs;
+use azur_egui_theme::desktop;
+use azur_egui_theme::tokens::space;
 use crate::sys::snapshot::{History, Snapshot};
 use egui::{Align2, Color32, CornerRadius, Pos2, Rect, Sense, Ui, Vec2};
 
@@ -36,8 +39,13 @@ impl PerfTab {
         let list_w = 232.0f32.min(full.width() * 0.34);
 
         let list_rect = Rect::from_min_size(full.min, Vec2::new(list_w, full.height()));
+        // `space-3` between the two columns, off Azur's own scale. Neither of them
+        // is a surface -- both are painted straight onto the canvas this tab shows
+        // -- so what divides them is space between two groups of content, not a
+        // seam. A seam is what welds two *panels* together, and the ones in this
+        // window are the rail, the toolbar and the status bar.
         let detail_rect = Rect::from_min_max(
-            Pos2::new(full.left() + list_w + 10.0, full.top()),
+            Pos2::new(full.left() + list_w + space::S3, full.top()),
             full.max,
         );
 
@@ -157,26 +165,21 @@ impl PerfTab {
                         }
 
                         let p = ui.painter();
-                        let fill = if active {
-                            t.surface_hi
-                        } else if resp.hovered() {
-                            t.surface
-                        } else {
-                            Color32::TRANSPARENT
-                        };
-                        if fill != Color32::TRANSPARENT {
-                            p.rect_filled(r, t.radius_sm, fill);
+                        // A row in a listing, so it takes the window's row fills --
+                        // the accent's surface ramp when selected, the one hover
+                        // grey under the pointer -- and it is square, like every
+                        // other row here.
+                        if let Some(fill) = desktop::row_fill(t, active, resp.hovered()) {
+                            p.rect_filled(r, desktop::structural_radius(), fill);
                         }
-                        // Accent stripe marks the current selection.
+                        // The bar is `accent-mark`, not the resource's own colour:
+                        // the fill under it is now an accent surface, and CPU's
+                        // series colour is the same azure, so that bar would have
+                        // been drawn in the colour of what it sits on. The
+                        // thumbnail beside it is already in the resource's colour,
+                        // which is what tells Disk 0 from Disk 1.
                         if active {
-                            p.rect_filled(
-                                Rect::from_min_size(
-                                    r.left_top() + Vec2::new(0.0, 6.0),
-                                    Vec2::new(3.0, r.height() - 12.0),
-                                ),
-                                CornerRadius::same(2),
-                                *color,
-                            );
+                            desktop::selection_bar(p, r, t);
                         }
 
                         // Thumbnail graph on the left, labels on the right.
@@ -196,16 +199,16 @@ impl PerfTab {
                         p.text(
                             Pos2::new(tx, r.top() + 17.0),
                             Align2::LEFT_CENTER,
-                            elide_to_width(ui, title, &t.fonts.medium, avail),
-                            t.fonts.medium.clone(),
-                            t.text,
+                            elide_to_width(ui, title, &t.fonts.body_strong, avail),
+                            t.fonts.body_strong.clone(),
+                            t.text.primary,
                         );
                         p.text(
                             Pos2::new(tx, r.top() + 38.0),
                             Align2::LEFT_CENTER,
-                            elide_to_width(ui, sub, &t.fonts.small, avail),
-                            t.fonts.small.clone(),
-                            t.text_dim,
+                            elide_to_width(ui, sub, &t.fonts.caption, avail),
+                            t.fonts.caption.clone(),
+                            t.text.secondary,
                         );
                     }
                 });
@@ -245,43 +248,30 @@ impl PerfTab {
     fn detail_cpu(&mut self, ui: &mut Ui, t: &Theme, snap: &Snapshot, rect: Rect) {
         let mut y = title(ui, t, rect, "CPU", &snap.cpu_name);
 
-        // Toggle between the aggregate graph and one graph per logical CPU.
-        // Laid out right-to-left so the group ends flush with the panel edge
-        // instead of overflowing it.
-        let toggle_rect = Rect::from_min_size(
-            Pos2::new(rect.right() - 260.0, rect.top() + 2.0),
-            Vec2::new(260.0, 26.0),
-        );
-        let mut per_core = self.per_core;
+        // Two views of the same data, which is what Azur's `Tabs` is for: labels
+        // over a rule, with an accent indicator under the selected one. On their
+        // own row under the title rather than beside it -- the strip's rule spans
+        // whatever it is given, and next to the title it ran through the
+        // processor name.
+        let mut which = usize::from(self.per_core);
+        // The strip's own height, asked rather than assumed: `Tabs` is a body line
+        // with `space-3` either side and a 1px rule under it, and the 32 that used to
+        // be here left the graph below starting a point above that rule.
+        let strip_h = azur_egui_theme::components::tabs_height();
         ui.scope_builder(
             egui::UiBuilder::new()
-                .max_rect(toggle_rect)
-                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                .max_rect(Rect::from_min_size(
+                    Pos2::new(rect.left(), y),
+                    Vec2::new(rect.width(), strip_h),
+                ))
+                .layout(egui::Layout::left_to_right(egui::Align::Min)),
             |ui| {
-                // `frame_when_inactive(true)`: a selectable button draws no
-                // frame until hovered, and a frame's stroke counts towards its
-                // size, so without this the unselected one grows 2px under the
-                // cursor and nudges its neighbour sideways.
-                if ui
-                    .add(
-                        egui::Button::selectable(per_core, "Logical processors")
-                            .frame_when_inactive(true),
-                    )
-                    .on_hover_text("One graph per logical processor")
-                    .clicked()
-                {
-                    per_core = true;
-                }
-                if ui
-                    .add(egui::Button::selectable(!per_core, "Overall").frame_when_inactive(true))
-                    .on_hover_text("All logical processors combined")
-                    .clicked()
-                {
-                    per_core = false;
-                }
+                ui.add(Tabs::new(&mut which).tabs(["Overall", "Logical processors"]))
+                    .on_hover_text("All logical processors combined, or one graph each");
             },
         );
-        self.per_core = per_core;
+        self.per_core = which == 1;
+        y += strip_h + space::S2;
 
         let stats_h = 118.0;
         let graph_rect = Rect::from_min_max(
@@ -290,11 +280,9 @@ impl PerfTab {
         );
 
         if self.per_core && !snap.hist.per_core.is_empty() {
-            // Grid of small graphs, sized so it stays roughly square.
             let n = snap.hist.per_core.len();
-            let cols = (n as f32).sqrt().ceil().max(1.0) as usize;
-            let rows = n.div_ceil(cols);
             let gap = 4.0;
+            let (cols, rows) = grid_shape(n, graph_rect.size(), gap);
             let cw = (graph_rect.width() - gap * (cols - 1) as f32) / cols as f32;
             let ch = (graph_rect.height() - gap * (rows.saturating_sub(1)) as f32) / rows as f32;
             for (i, h) in snap.hist.per_core.iter().enumerate() {
@@ -314,8 +302,8 @@ impl PerfTab {
                         r.left_top() + Vec2::new(4.0, 3.0),
                         Align2::LEFT_TOP,
                         format!("{i}"),
-                        t.fonts.small.clone(),
-                        t.text_faint,
+                        t.fonts.caption.clone(),
+                        t.text.tertiary,
                     );
                 }
             }
@@ -411,8 +399,8 @@ impl PerfTab {
             Pos2::new(rect.left(), graph_rect.bottom() + 4.0),
             Align2::LEFT_TOP,
             "Memory composition",
-            t.fonts.small.clone(),
-            t.text_dim,
+            t.fonts.caption.clone(),
+            t.text.secondary,
         );
         let in_use_only = snap
             .mem
@@ -427,11 +415,13 @@ impl PerfTab {
             ),
             &[
                 (in_use_only as f32, t.mem),
-                (snap.mem.modified as f32, t.warn.gamma_multiply(0.8)),
+                (snap.mem.modified as f32, t.status.warning.gamma_multiply(0.8)),
                 (snap.mem.standby as f32, t.mem.gamma_multiply(0.45)),
                 // Free memory is the absence of a series, so it gets a neutral
-                // surface rather than a hue of its own.
-                (snap.mem.free as f32, t.surface_hi),
+                // surface rather than a hue of its own. `background-control`, which
+                // is a surface: the hover rungs are three steps out of the ramp in
+                // this window, and a segment of a chart is not hovering.
+                (snap.mem.free as f32, t.bg.control),
             ],
         );
 
@@ -515,8 +505,8 @@ impl PerfTab {
             Pos2::new(rect.left(), y),
             Align2::LEFT_TOP,
             "Active time",
-            t.fonts.small.clone(),
-            t.text_dim,
+            t.fonts.caption.clone(),
+            t.text.secondary,
         );
         let empty = History::default();
         let h_active = snap.hist.disk.get(i).unwrap_or(&empty);
@@ -555,8 +545,8 @@ impl PerfTab {
             Pos2::new(rect.left(), g2_top - 22.0),
             Align2::LEFT_TOP,
             "Disk transfer rate",
-            t.fonts.small.clone(),
-            t.text_dim,
+            t.fonts.caption.clone(),
+            t.text.secondary,
         );
         axis_labels(ui, t, g2, &top, "0", "60 seconds");
 
@@ -629,7 +619,7 @@ impl PerfTab {
             // Send is line-only so the two series stay legible when they cross.
             Series {
                 hist: send,
-                color: t.accent,
+                color: t.accent.default,
                 fill: false,
             },
         ];
@@ -647,7 +637,7 @@ impl PerfTab {
         let recv_w = legend_width(ui, t, "Receive");
         let gap = 14.0;
         let right = graph_rect.right() - 8.0;
-        legend_dot(ui, t, Pos2::new(right - send_w, ly), t.accent, "Send");
+        legend_dot(ui, t, Pos2::new(right - send_w, ly), t.accent.default, "Send");
         legend_dot(
             ui,
             t,
@@ -752,14 +742,14 @@ fn title(ui: &Ui, t: &Theme, rect: Rect, name: &str, subtitle: &str) -> f32 {
         Align2::LEFT_TOP,
         name,
         egui::FontId::new(19.0, egui::FontFamily::Name("semibold".into())),
-        t.text,
+        t.text.primary,
     );
     p.text(
         Pos2::new(rect.left(), rect.top() + 26.0),
         Align2::LEFT_TOP,
         subtitle,
-        t.fonts.small.clone(),
-        t.text_dim,
+        t.fonts.caption.clone(),
+        t.text.secondary,
     );
     rect.top() + 52.0
 }
@@ -771,23 +761,63 @@ fn axis_labels(ui: &Ui, t: &Theme, rect: Rect, top: &str, bottom: &str, span: &s
         rect.left_top() + Vec2::new(4.0, 2.0),
         Align2::LEFT_TOP,
         top,
-        t.fonts.small.clone(),
-        t.text_faint,
+        t.fonts.caption.clone(),
+        t.text.tertiary,
     );
     p.text(
         rect.left_bottom() + Vec2::new(4.0, -2.0),
         Align2::LEFT_BOTTOM,
         bottom,
-        t.fonts.small.clone(),
-        t.text_faint,
+        t.fonts.caption.clone(),
+        t.text.tertiary,
     );
     p.text(
         rect.right_bottom() + Vec2::new(-4.0, -2.0),
         Align2::RIGHT_BOTTOM,
         span,
-        t.fonts.small.clone(),
-        t.text_faint,
+        t.fonts.caption.clone(),
+        t.text.tertiary,
     );
+}
+
+/// Pick `(cols, rows)` for `n` tiles filling `area`, gaps included.
+///
+/// The obvious `cols = ceil(sqrt(n))` gives square tiles only in a square area.
+/// The per-core pane is landscape, so on a 24-thread machine it chose 5x5 --
+/// leaving a hole in the last row *and* stretching every tile to nearly 2:1. Two
+/// things decide instead:
+///
+/// * **Holes cost.** Every unfilled slot is a gap in the grid, so each one is
+///   charged enough that a shape which tiles `n` exactly wins any close call.
+/// * **Tile shape costs.** A tile should be a little wider than tall, which is
+///   how a graph of the last 60 seconds reads. Judged on the log of the ratio so
+///   that half as wide and twice as wide are penalised equally.
+///
+/// 24 threads in a landscape pane then comes out 6x4: no holes, tiles at 1.2:1.
+fn grid_shape(n: usize, area: Vec2, gap: f32) -> (usize, usize) {
+    /// Tile width over height that a sparkline wears best.
+    const IDEAL_ASPECT: f32 = 1.25;
+    /// Score added per empty slot. Worth roughly a 1.8x error in tile shape,
+    /// which is what makes zero holes the default rather than a tiebreak.
+    const HOLE_COST: f32 = 0.6;
+
+    let mut best = (n.max(1), 1);
+    let mut best_score = f32::INFINITY;
+    for cols in 1..=n.max(1) {
+        let rows = n.div_ceil(cols);
+        let cw = (area.x - gap * (cols - 1) as f32) / cols as f32;
+        let ch = (area.y - gap * (rows - 1) as f32) / rows as f32;
+        if cw <= 1.0 || ch <= 1.0 {
+            continue;
+        }
+        let holes = cols * rows - n;
+        let score = (cw / ch / IDEAL_ASPECT).ln().abs() + HOLE_COST * holes as f32;
+        if score < best_score {
+            best_score = score;
+            best = (cols, rows);
+        }
+    }
+    best
 }
 
 /// A label/value list. Values are right-aligned within `width` so numbers line
@@ -796,19 +826,30 @@ fn stat_column(ui: &Ui, t: &Theme, origin: Pos2, width: f32, rows: &[(&str, &str
     let p = ui.painter();
     for (i, (label, value)) in rows.iter().enumerate() {
         let y = origin.y + i as f32 * 24.0;
+        // Both halves in caption: a statistics grid is metadata, and at body size
+        // the widest label ("Logical processors") and its value meet in the
+        // middle of the column.
+        let value_w = p
+            .layout_no_wrap(value.to_string(), t.fonts.caption.clone(), t.text.primary)
+            .size()
+            .x;
+        // The label is what gives way when a column is too narrow for both. A
+        // shortened number reads as a different number; a shortened label is
+        // still recognisable from its first few words, and the ellipsis says so.
+        let room = (width - 12.0 - value_w - space::S3).max(0.0);
         p.text(
             Pos2::new(origin.x, y),
             Align2::LEFT_TOP,
-            *label,
-            t.fonts.small.clone(),
-            t.text_dim,
+            elide_to_width(ui, label, &t.fonts.caption, room),
+            t.fonts.caption.clone(),
+            t.text.secondary,
         );
         p.text(
-            Pos2::new(origin.x + width - 14.0, y),
+            Pos2::new(origin.x + width - 12.0, y),
             Align2::RIGHT_TOP,
             *value,
-            t.fonts.body.clone(),
-            t.text,
+            t.fonts.caption.clone(),
+            t.text.primary,
         );
     }
 }
@@ -817,7 +858,7 @@ fn stat_column(ui: &Ui, t: &Theme, origin: Pos2, width: f32, rows: &[(&str, &str
 fn legend_width(ui: &Ui, t: &Theme, label: &str) -> f32 {
     14.0 + ui
         .painter()
-        .layout_no_wrap(label.to_owned(), t.fonts.small.clone(), Color32::WHITE)
+        .layout_no_wrap(label.to_owned(), t.fonts.caption.clone(), Color32::WHITE)
         .size()
         .x
 }
@@ -833,8 +874,8 @@ fn legend_dot(ui: &Ui, t: &Theme, pos: Pos2, color: Color32, label: &str) {
         pos + Vec2::new(14.0, 0.0),
         Align2::LEFT_TOP,
         label,
-        t.fonts.small.clone(),
-        t.text_dim,
+        t.fonts.caption.clone(),
+        t.text.secondary,
     );
 }
 
@@ -875,4 +916,43 @@ fn elide_to_width(ui: &Ui, s: &str, font: &egui::FontId, max_w: f32) -> String {
     let mut out: String = chars[..lo].iter().collect();
     out.push('…');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::grid_shape;
+    use egui::Vec2;
+
+    /// The case this was written for: 24 threads used to land in a 5x5 grid with
+    /// a hole in it, whatever shape the pane was.
+    #[test]
+    fn fills_every_slot_when_the_thread_count_allows_it() {
+        // A maximized window: wide pane, so the grid goes wide too.
+        assert_eq!(grid_shape(24, Vec2::new(2000.0, 1000.0), 4.0), (6, 4));
+        // The default window: the pane is nearly square, so the same 24 tiles
+        // turn a quarter -- still no hole, and still wider than tall each.
+        assert_eq!(grid_shape(24, Vec2::new(520.0, 530.0), 4.0), (4, 6));
+        for n in [2, 4, 6, 8, 12, 16, 20, 32, 64, 128] {
+            let (c, r) = grid_shape(n, Vec2::new(2000.0, 1000.0), 4.0);
+            assert_eq!(c * r, n, "{n} threads left {} slots empty", c * r - n);
+        }
+    }
+
+    /// A prime thread count cannot tile a rectangle, so one hole is the best
+    /// available -- but only one, and not at the cost of a 23:1 strip.
+    #[test]
+    fn spends_a_hole_rather_than_a_useless_shape() {
+        let (c, r) = grid_shape(23, Vec2::new(2000.0, 1000.0), 4.0);
+        assert_eq!((c, r), (6, 4));
+        assert_eq!(c * r - 23, 1);
+    }
+
+    /// A pane too small to divide still has to name a grid rather than divide by
+    /// zero or return nothing.
+    #[test]
+    fn survives_a_pane_with_no_room_in_it() {
+        assert_eq!(grid_shape(1, Vec2::new(100.0, 100.0), 4.0), (1, 1));
+        let (c, r) = grid_shape(24, Vec2::new(8.0, 8.0), 4.0);
+        assert!(c >= 1 && r >= 1 && c * r >= 24);
+    }
 }

@@ -76,23 +76,23 @@ pub fn counters() -> (u64, u64) {
 
 // --- paint-path bisect ------------------------------------------------------
 
-/// How much of the UI to paint, from `YATM_UI_LEVEL`: 0 nothing, 1 nav rail,
+/// How much of the UI to paint, from `AZTM_UI_LEVEL`: 0 nothing, 1 nav rail,
 /// 2 also the toolbar and status bar, 3 (default) everything. Halving the
 /// painted surface and re-measuring is the only way to attribute growth that
 /// happens inside a driver, where there is no allocation to instrument.
 pub fn ui_level() -> u32 {
     static LEVEL: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *LEVEL.get_or_init(|| {
-        std::env::var("YATM_UI_LEVEL")
+        std::env::var("AZTM_UI_LEVEL")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(3)
     })
 }
 
-/// `YATM_NO_ICONS=1` points every row at one shared texture, so the table stops
+/// `AZTM_NO_ICONS=1` points every row at one shared texture, so the table stops
 /// forcing a draw-call break per row.
 pub fn no_icons() -> bool {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *OFF.get_or_init(|| std::env::var_os("YATM_NO_ICONS").is_some())
+    *OFF.get_or_init(|| std::env::var_os("AZTM_NO_ICONS").is_some())
 }

@@ -125,6 +125,24 @@ pub fn enumerate() -> Vec<Service> {
     out
 }
 
+/// The command line a service starts, from its `ImagePath`.
+///
+/// Not part of [`Service`]: nothing displays it, and it is only wanted for the one
+/// row a context menu is open on. Reading it for all several hundred of them on
+/// every refresh would be work nobody asked for.
+///
+/// The registry rather than `QueryServiceConfigW` — the same place, reachable
+/// without opening a handle to the service controller, and readable by a standard
+/// user. Still a command line, not a path: see
+/// [`super::actions::executable_of`].
+pub fn image_path(service: &str) -> Option<String> {
+    use super::util::reg_string;
+    use windows_sys::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+
+    let path = format!(r"SYSTEM\CurrentControlSet\Services\{service}");
+    reg_string(HKEY_LOCAL_MACHINE, &path, "ImagePath").filter(|p| !p.is_empty())
+}
+
 fn read_group(service: &str) -> Option<Arc<str>> {
     use super::util::reg_string;
     use windows_sys::Win32::System::Registry::HKEY_LOCAL_MACHINE;

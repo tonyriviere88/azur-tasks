@@ -94,6 +94,14 @@ pub fn percent_sign(buf: &mut String, pct: f32) {
     let _ = write!(buf, "{:.0}%", pct);
 }
 
+/// The same, for the one caller that wants a value rather than a buffer: a dial
+/// draws one number, so the buffer would be ceremony.
+pub fn percent_sign_of(pct: f32) -> String {
+    let mut s = String::new();
+    percent_sign(&mut s, pct);
+    s
+}
+
 /// Thousands-grouped integer using a narrow no-break space, which reads well in
 /// a right-aligned numeric column.
 pub fn group_u64(buf: &mut String, mut v: u64) {

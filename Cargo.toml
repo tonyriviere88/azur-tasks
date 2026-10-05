@@ -1,19 +1,39 @@
 [package]
-name = "yatm"
+name = "azur-task-manager"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
-description = "Yet Another Task Manager - a fast, low-footprint Windows task manager"
+description = "Azur Task Manager - a fast, low-footprint Windows task manager"
 publish = false
 
+# `src/bin/memprobe.rs` is a second binary -- a bare eframe window, for telling
+# framework memory cost apart from ours -- which is enough to make `cargo run`
+# refuse to guess. Name the application, so the plain commands mean the
+# application and the probe is the one that has to be asked for by name.
+default-run = "azur-task-manager"
+
 [[bin]]
-name = "yatm"
+name = "azur-task-manager"
 path = "src/main.rs"
+
+# The probe is a measurement tool, not part of the product: it is built only when
+# asked for. `required-features` is what makes `cargo build` skip it rather than
+# link a second eframe window on every build of the application.
+#
+#   cargo run --features memprobe --bin memprobe
+[[bin]]
+name = "memprobe"
+path = "src/bin/memprobe.rs"
+required-features = ["memprobe"]
 
 [features]
 # Account for live heap bytes and print them each tick. Costs two atomics per
 # allocation, so it is a build-time opt-in rather than a runtime flag.
 memtrace = []
+
+# Build the `memprobe` binary. Adds no code to the application -- it exists only
+# to gate that target, since a bin cannot be opted out of any other way.
+memprobe = []
 
 [dependencies]
 # UI: immediate-mode, GPU-composited through wgpu -> DirectX 12.
@@ -23,6 +43,11 @@ eframe = { version = "0.35", default-features = false, features = [
     "default_fonts",
 ] }
 egui = { version = "0.35", default-features = false }
+
+# Palette, semantic roles and egui styling. Its egui must stay in lockstep with
+# the one above: two egui versions in the graph would be two `Context` types,
+# and the theme would style neither.
+azur-egui-theme = { path = "../azur-egui-theme" }
 
 # Lock-free snapshot handoff from the sampler thread to the UI thread.
 arc-swap = "1.9"
@@ -42,11 +67,14 @@ features = [
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_Etw",
+    "Win32_System_Environment",
     "Win32_System_IO",
     "Win32_System_Ioctl",
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
     "Win32_System_Performance",
+    "Win32_System_Power",
     "Win32_System_ProcessStatus",
     "Win32_System_Registry",
     "Win32_System_Services",

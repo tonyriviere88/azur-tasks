@@ -5,32 +5,57 @@ use crate::sys::sampler::{self, Monitor};
 use crate::sys::snapshot::Snapshot;
 use crate::ui::icons::{self, Glyph, IconCache};
 use crate::ui::theme::{self, Theme};
-use crate::ui::{details, fmt, performance, processes, services, startup, Action};
+use crate::ui::{
+    details, fmt, inspector, marks, performance, processes, sensors, services, startup, Action,
+};
 
-use egui::{Align2, Color32, CornerRadius, Id, Pos2, Rect, Sense, Stroke, Ui, Vec2};
-use std::time::{Duration, Instant};
+use azur_egui_theme as azur;
+use azur::components::{
+    Badge, BadgeVariant, Button, Dialog, DialogSize, IconButton,
+    MessageBar, NavItem, NavigationRail, SearchBox, Select, Size, Text, TextColor, TextVariant,
+    TitleBar, TitleBarAction, Toast, Toaster, Variant,
+};
+use azur::tokens::{row, space};
+use azur::components::Intent;
+use egui::{Align, Align2, Color32, Id, Layout, Pos2, Rect, Sense, Ui, Vec2};
+use std::time::Instant;
 
-/// Shared height for every interactive control in the toolbar.
-const CONTROL_H: f32 = 28.0;
+/// Height of the command row under the title bar: the tallest control in it with
+/// `space-1` of air above and below.
+///
+/// Everything in the row is a small control at the desktop density -- search box,
+/// buttons, the cadence picker -- so the row is exactly `control::SMALL` plus its
+/// padding. Anything taller added here (a `CommandBar` frames its buttons in
+/// `space-1` and stands 4px higher) has to be counted in, or the row overflows its
+/// own panel and paints over the seam under it.
+const TOOLBAR_H: f32 = azur::tokens::control::SMALL + PANEL_PAD_Y * 2.0;
 
-/// Navigation rail width, expanded and collapsed. Collapsed leaves room for a
-/// 17px glyph plus the hover pill around it, and nothing else.
-const NAV_W: f32 = 196.0;
-const NAV_W_NARROW: f32 = 54.0;
+/// The air between a chrome strip's edge and the controls in it. `space-2`: at the
+/// dense density the strip is only as tall as one control, and this is what keeps
+/// the control off the seam -- padding inside a surface, not a margin around a
+/// floating one.
+const PANEL_PAD_Y: f32 = space::S2;
+
+/// The status bar: `row::TIGHT`, which is the height the design system gives a
+/// status line -- one caption line and a point of air. It carries small badges
+/// (`space-5` tall) and nothing else.
+const STATUS_H: f32 = row::TIGHT;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Processes,
     Performance,
+    Sensors,
     Details,
     Services,
     Startup,
 }
 
 impl Tab {
-    const ALL: [Tab; 5] = [
+    const ALL: [Tab; 6] = [
         Tab::Processes,
         Tab::Performance,
+        Tab::Sensors,
         Tab::Details,
         Tab::Services,
         Tab::Startup,
@@ -40,33 +65,43 @@ impl Tab {
         match self {
             Self::Processes => "Processes",
             Self::Performance => "Performance",
+            Self::Sensors => "Sensors",
             Self::Details => "Details",
             Self::Services => "Services",
             Self::Startup => "Startup apps",
         }
     }
 
-    fn glyph(self) -> Glyph {
+    /// The rail glyph, as an icon a component can take.
+    fn icon(self) -> azur::icons::Icon<'static> {
         match self {
-            Self::Processes => Glyph::Processes,
-            Self::Performance => Glyph::Performance,
-            Self::Details => Glyph::Details,
-            Self::Services => Glyph::Services,
-            Self::Startup => Glyph::Startup,
+            Self::Processes => &icons::icon::processes,
+            Self::Performance => &icons::icon::performance,
+            Self::Sensors => &icons::icon::gauge,
+            Self::Details => &icons::icon::details,
+            Self::Services => &icons::icon::services,
+            Self::Startup => &icons::icon::startup,
         }
     }
 
     /// Tabs whose content is filtered by the search box.
     fn searchable(self) -> bool {
-        !matches!(self, Self::Performance)
+        !matches!(self, Self::Performance | Self::Sensors)
     }
-}
 
-/// A transient message shown in the status bar.
-struct Toast {
-    text: String,
-    error: bool,
-    at: Instant,
+    /// Whether this tab's content is a table that runs to the window's edges.
+    ///
+    /// A table paints its own panel and is welded to the strips above and below it
+    /// by seams, so the central panel gives it no margin at all. The two card tabs
+    /// want the opposite: cards float on the canvas, and the canvas has to be
+    /// visible around them.
+    ///
+    /// The same tabs as [`Self::searchable`] today, and a different question -- one
+    /// is about what a filter would narrow, the other about what the content is
+    /// shaped like. A tab could answer them differently.
+    fn tabular(self) -> bool {
+        !matches!(self, Self::Performance | Self::Sensors)
+    }
 }
 
 /// An action held back until the user confirms it.
@@ -77,7 +112,12 @@ struct Toast {
 struct Confirm {
     action: Action,
     heading: String,
+    /// What the action will do, in the dialog's body.
     detail: String,
+    /// What it costs, in a warning `MessageBar` under it. Split from `detail` so
+    /// the two do not say the same thing twice, which is what a body that ends in
+    /// "unsaved work will be lost" above a bar that says the same reads as.
+    risk: &'static str,
     /// Label for the button that goes through with it.
     verb: &'static str,
 }
@@ -93,10 +133,12 @@ pub struct App {
     processes: processes::ProcessesTab,
     details: details::DetailsTab,
     perf: performance::PerfTab,
+    sensors: sensors::SensorsTab,
     services: services::ServicesTab,
     startup: startup::StartupTab,
 
-    toast: Option<Toast>,
+    /// Action results, as Azur toasts in the corner of the window.
+    toaster: Toaster,
     /// Wall-clock cost of the previous frame's `ui` call, shown in the status
     /// bar. This is a latency-focused app; the number should be visible.
     frame_ms: f32,
@@ -110,6 +152,16 @@ pub struct App {
     order_frozen: bool,
     /// Rail shows icons only.
     nav_collapsed: bool,
+    /// The modules / handles / threads panel under the process list.
+    inspector: inspector::InspectorPanel,
+    /// Whether that panel is open. Off at every launch, and never persisted: it is
+    /// a look at one process, which is not a thing a window can still be doing
+    /// tomorrow. It also costs a read per sample while it is up.
+    inspector_open: bool,
+    /// Mirrors the window's maximized state, so the title bar can offer restore
+    /// instead of maximize. The platform owns the truth; this is what we last
+    /// asked for or last saw.
+    maximized: bool,
     /// Destructive action waiting on a yes/no.
     confirm: Option<Confirm>,
     /// Persisted geometry, column layouts and rail state.
@@ -138,7 +190,14 @@ impl App {
         ] {
             settings.restore_table(name, table);
         }
-        let nav_collapsed = settings.bool("nav.collapsed", false);
+        let mut sensors = sensors::SensorsTab::new();
+        settings.restore_sensors("sensors", &mut sensors.layout);
+        // Collapsed by default: the rail's icons are captioned by the tab heading
+        // beside them, and the width it gives back goes to the table, which is what
+        // a reader came for. Expanding is one click and it is remembered.
+        let nav_collapsed = settings.bool("nav.collapsed", true);
+        let maximized = settings.bool("window.maximized", false);
+
 
         Self {
             mon,
@@ -150,9 +209,10 @@ impl App {
             processes,
             details,
             perf: performance::PerfTab::new(),
+            sensors,
             services,
             startup,
-            toast: None,
+            toaster: Toaster::new(),
             frame_ms: 0.0,
             frame_ms_peak: 0.0,
             last_generation: u64::MAX,
@@ -160,6 +220,12 @@ impl App {
             pending_exit: false,
             order_frozen: false,
             nav_collapsed,
+            inspector: inspector::InspectorPanel::new(&cc.egui_ctx),
+            // Not restored, and not saved: the panel is a look at one process, and a
+            // window that came back with it open would be answering a question from
+            // the last session.
+            inspector_open: false,
+            maximized,
             confirm: None,
             settings,
         }
@@ -172,10 +238,8 @@ impl App {
         let text = match &action {
             Action::EndTask { name, pid } => Some((
                 format!("End {name}?"),
-                format!(
-                    "PID {pid}. Unsaved work will be lost, and a process ended this \
-                     way gets no chance to shut down cleanly."
-                ),
+                format!("PID {pid} will be ended immediately."),
+                "It gets no chance to shut down cleanly, and unsaved work in it is lost.",
                 "End process",
             )),
             Action::EndTree { key } => {
@@ -188,22 +252,20 @@ impl App {
                     .unwrap_or_else(|| "this process".to_owned());
                 Some((
                     format!("End {name} and its children?"),
-                    format!(
-                        "{} processes will be ended, deepest first. Unsaved work in \
-                         any of them will be lost.",
-                        victims.len()
-                    ),
+                    format!("{} processes will be ended, deepest first.", victims.len()),
+                    "None of them gets a chance to shut down cleanly.",
                     "End process tree",
                 ))
             }
             _ => None,
         };
         match text {
-            Some((heading, detail, verb)) => {
+            Some((heading, detail, risk, verb)) => {
                 self.confirm = Some(Confirm {
                     action,
                     heading,
                     detail,
+                    risk,
                     verb,
                 });
             }
@@ -214,44 +276,42 @@ impl App {
     /// The confirmation dialog. Returns once the answer has been acted on.
     fn confirm_dialog(&mut self, ctx: &egui::Context, snap: &Snapshot) {
         let Some(c) = &self.confirm else { return };
-        let t = &self.theme;
+        // Copied out so the dialog's closures do not borrow `self.confirm` while
+        // the answer is being written back to it. Only while a dialog is open.
+        let (heading, detail, risk, verb) = (c.heading.clone(), c.detail.clone(), c.risk, c.verb);
 
         let mut answer: Option<bool> = None;
-        egui::Modal::new(Id::new("confirm")).show(ctx, |ui| {
-            ui.set_max_width(430.0);
-            ui.horizontal(|ui| {
-                let (rect, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
-                icons::glyph(ui.painter(), rect, Glyph::Shield, t.warn, t);
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new(&c.heading).size(15.0).strong());
-            });
-            ui.add_space(6.0);
-            ui.label(egui::RichText::new(&c.detail).color(t.text_dim));
-            ui.add_space(14.0);
-
-            // Cancel first and focused, so Enter and a stray double-click both
-            // do the harmless thing.
-            ui.horizontal(|ui| {
-                let cancel = ui.button("Cancel");
+        // `open` is what the dialog writes a dismissal into -- the scrim, the
+        // close button and Escape all clear it.
+        let mut open = true;
+        Dialog::new(&heading, &mut open)
+            .size(DialogSize::Small)
+            .footer(|ui| {
+                // Right-to-left inside the footer: the action added first lands
+                // furthest right, where the primary button belongs.
+                if ui.add(Button::new(verb).variant(Variant::Danger)).clicked() {
+                    answer = Some(true);
+                }
+                let cancel = ui.add(Button::new("Cancel").variant(Variant::Subtle));
                 if cancel.clicked() {
                     answer = Some(false);
                 }
-                if !ctx.memory(|m| m.focused().is_some()) {
+                // Focused, so Enter and a stray double-click both do the
+                // harmless thing.
+                if !ui.ctx().memory(|m| m.focused().is_some()) {
                     cancel.request_focus();
                 }
-                if ui
-                    .add(egui::Button::new(egui::RichText::new(c.verb).color(t.crit)))
-                    .clicked()
-                {
-                    answer = Some(true);
-                }
+            })
+            .show(ctx, |ui| {
+                ui.add(Text::new(&detail).color(TextColor::Secondary));
+                ui.add_space(space::S3);
+                ui.add(MessageBar::new(risk).intent(Intent::Warning));
             });
-        });
 
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
             answer = Some(false);
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+        if !open {
             answer = Some(false);
         }
 
@@ -286,11 +346,16 @@ impl App {
         for (name, table) in tables {
             self.settings.sync_table(name, table);
         }
+        self.settings.sync_sensors("sensors", &self.sensors.layout);
 
         // Geometry: outer rect, so restoring puts the frame back where it was
         // rather than offsetting the window by the caption height each launch.
         ctx.input(|i| {
             let vp = i.viewport();
+            // The title bar offers restore instead of maximize from this.
+            if let Some(max) = vp.maximized {
+                self.maximized = max;
+            }
             if vp.maximized == Some(true) || vp.minimized == Some(true) {
                 // Saving a maximized frame would restore a window that fills the
                 // screen but is not maximized, and could not be un-maximized to
@@ -319,142 +384,62 @@ impl App {
     // Chrome
     // -----------------------------------------------------------------
 
-    fn nav_rail(&mut self, ui: &mut Ui, snap: &Snapshot) {
+    /// The navigation rail: Azur's, with this app's live footer beneath it.
+    fn nav_rail(&mut self, ui: &mut Ui, snap: &Snapshot) -> bool {
         let t = &self.theme;
         let narrow = self.nav_collapsed;
         let rect = ui.available_rect_before_wrap();
-        ui.painter().rect_filled(rect, CornerRadius::ZERO, t.nav);
-        ui.painter().vline(
-            rect.right() - 0.5,
-            rect.y_range(),
-            Stroke::new(1.0, t.border_soft),
-        );
+        let mut elevate = false;
 
-        // --- title / collapse toggle --------------------------------------
-        //
-        // The title is the control: there is nothing else for a 196px header to
-        // do, and a separate chevron somewhere else would be one more thing to
-        // find. Collapsed, only the glyph is left.
-        let header_h = 36.0;
-        let toggle = if narrow {
-            Rect::from_center_size(
-                Pos2::new(rect.center().x, rect.top() + header_h * 0.5),
-                Vec2::splat(28.0),
-            )
-        } else {
-            Rect::from_min_size(
-                Pos2::new(rect.left() + 6.0, rect.top() + 4.0),
-                Vec2::new(rect.width() - 12.0, header_h - 8.0),
-            )
-        };
-        let tr = ui.interact(toggle, Id::new("nav-toggle"), Sense::click());
-        if tr.hovered() {
-            ui.painter().rect_filled(toggle, t.radius_sm, t.surface);
-        }
-        let glyph_c = if narrow {
-            toggle.center()
-        } else {
-            Pos2::new(toggle.left() + 14.0, toggle.center().y)
-        };
-        icons::glyph(
-            ui.painter(),
-            Rect::from_center_size(glyph_c, Vec2::splat(16.0)),
-            Glyph::Sidebar,
-            if tr.hovered() { t.text } else { t.text_dim },
-            t,
+        // The rail lays its entries out from the top and the footer is anchored
+        // to the bottom, so each gets its own child `Ui` and neither has to know
+        // how tall the other is.
+        let foot_h = 132.0;
+        let mut nav = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(Rect::from_min_max(
+                    rect.min,
+                    Pos2::new(rect.right(), rect.bottom() - foot_h),
+                ))
+                .layout(Layout::top_down(Align::Min)),
         );
-        if !narrow {
-            ui.painter().text(
-                Pos2::new(toggle.left() + 32.0, toggle.center().y),
-                Align2::LEFT_CENTER,
-                "Task Manager",
-                t.fonts.medium.clone(),
-                t.text,
-            );
-        }
-        let tr = tr.on_hover_text(if narrow {
-            "Expand the sidebar"
-        } else {
-            "Collapse the sidebar"
-        });
-        if tr.clicked() {
+        let mut index = Tab::ALL.iter().position(|tab| *tab == self.tab).unwrap_or(0);
+        let mut toggled = false;
+        nav.add(
+            NavigationRail::new(&mut index)
+                .collapsed(narrow)
+                // The rail's own width is the rail's business, so its control
+                // lives here rather than in the command row.
+                .toggle(
+                    &icons::icon::sidebar,
+                    if narrow {
+                        "Expand the sidebar"
+                    } else {
+                        "Collapse the sidebar"
+                    },
+                    &mut toggled,
+                )
+                .items(Tab::ALL.map(|tab| NavItem::new(tab.label()).icon(tab.icon()))),
+        );
+        self.tab = Tab::ALL[index];
+        if toggled {
             self.nav_collapsed = !narrow;
         }
 
-        // --- tabs ----------------------------------------------------------
-        let item_h = 38.0;
-        let mut y = rect.top() + header_h + 8.0;
-        let mut picked = None;
-
-        for tab in Tab::ALL {
-            let r = Rect::from_min_size(
-                Pos2::new(rect.left() + 6.0, y),
-                Vec2::new(rect.width() - 12.0, item_h),
-            );
-            let mut resp = ui.interact(r, Id::new("nav").with(tab as u8), Sense::click());
-            let active = self.tab == tab;
-
-            if active {
-                ui.painter().rect_filled(r, t.radius_sm, t.surface_hi);
-                // Fluent-style selection pip.
-                ui.painter().rect_filled(
-                    Rect::from_min_size(
-                        Pos2::new(r.left() + 1.0, r.center().y - 9.0),
-                        Vec2::new(3.0, 18.0),
-                    ),
-                    CornerRadius::same(2),
-                    t.accent,
-                );
-            } else if resp.hovered() {
-                ui.painter().rect_filled(r, t.radius_sm, t.surface);
-            }
-
-            let fg = if active { t.text } else { t.text_dim };
-            let gx = if narrow { r.center().x } else { r.left() + 26.0 };
-            icons::glyph(
-                ui.painter(),
-                Rect::from_center_size(Pos2::new(gx, r.center().y), Vec2::splat(17.0)),
-                tab.glyph(),
-                if active { t.accent } else { fg },
-                t,
-            );
-            if narrow {
-                // The label is the only thing identifying a tab now, so it has
-                // to be reachable somehow.
-                resp = resp.on_hover_text(tab.label());
-            } else {
-                ui.painter().text(
-                    Pos2::new(r.left() + 45.0, r.center().y),
-                    Align2::LEFT_CENTER,
-                    tab.label(),
-                    t.fonts.nav.clone(),
-                    fg,
-                );
-            }
-
-            if resp.clicked() {
-                picked = Some(tab);
-            }
-            y += item_h + 2.0;
-        }
-        if let Some(tab) = picked {
-            self.tab = tab;
-        }
-
         // --- footer: live CPU and memory ----------------------------------
-        // Only the horizontal padding changes with the rail's width. The
-        // vertical geometry is shared, so the gauges sit at the same height in
-        // both states -- a shorter footer put them over the elevation button.
-        let pad = if narrow { 6.0 } else { 12.0 };
-        let foot_h = 132.0;
+        //
+        // Only the horizontal padding changes with the rail's width. The vertical
+        // geometry is shared, so the gauges sit at the same height in both states
+        // -- a shorter footer put them over the elevation button.
+        let pad = if narrow { space::S2 } else { space::S3 };
         let foot = Rect::from_min_max(
             Pos2::new(rect.left() + pad, rect.bottom() - foot_h),
-            Pos2::new(rect.right() - pad, rect.bottom() - 10.0),
+            Pos2::new(rect.right() - pad, rect.bottom() - space::S3),
         );
 
-        // Collapsed there is no room for a label beside a number beside a
-        // graph, so the label goes (the colour already says which is which)
-        // and the value sits directly above a shorter sparkline.
+        // Collapsed there is no room for a label beside a number beside a graph,
+        // so the label goes (the colour already says which is which) and the value
+        // sits directly above a shorter sparkline.
         let gauge_h = 30.0;
         let gap = 14.0;
         for (i, (label, value, color, hist)) in [
@@ -476,7 +461,7 @@ impl App {
                     Pos2::new(r.center().x, r.top()),
                     Align2::CENTER_TOP,
                     &b,
-                    t.fonts.small.clone(),
+                    t.fonts.caption.clone(),
                     color,
                 );
                 r.top() + 14.0
@@ -485,17 +470,17 @@ impl App {
                     r.left_top(),
                     Align2::LEFT_TOP,
                     label,
-                    t.fonts.small.clone(),
-                    t.text_dim,
+                    t.fonts.caption.clone(),
+                    t.text.secondary,
                 );
                 ui.painter().text(
                     r.right_top(),
                     Align2::RIGHT_TOP,
                     &b,
-                    t.fonts.small.clone(),
+                    t.fonts.caption.clone(),
                     color,
                 );
-                r.top() + 15.0
+                r.top() + 16.0
             };
             let graph = Rect::from_min_max(
                 Pos2::new(r.left(), graph_top),
@@ -509,383 +494,344 @@ impl App {
         }
 
         // --- elevation state / elevate button ------------------------------
-        let btn = if narrow {
-            Rect::from_center_size(
-                Pos2::new(rect.center().x, foot.bottom() - 13.0),
-                Vec2::splat(26.0),
+        //
+        // Collapsed, this is one glyph with nothing beside it, so it is centred on
+        // the rail the way the nav icons above it are — anything else reads as a
+        // stray mark pushed against the left edge. Expanded it is an icon followed
+        // by a label, which has to start where every other label in the rail does.
+        //
+        // The centring is a `top_down` layout rather than a horizontal one with
+        // `main_align: Center`: a single item's *cross*-axis alignment is exact in
+        // egui, where centring along the main axis of a horizontal run depends on
+        // the content's width being known before it is added.
+        let btn_h = azur::tokens::control::SMALL;
+        let (btn, layout) = if narrow {
+            // Only as tall as what goes in it: a `top_down` layout puts its item at
+            // the *top* of the box, so a box taller than the content would centre
+            // the glyph horizontally and lift it vertically in the same move. The
+            // centre stays where the expanded state has it.
+            let content_h = if self.elevated { 14.0 } else { btn_h };
+            (
+                Rect::from_center_size(
+                    Pos2::new(foot.center().x, foot.bottom() - btn_h / 2.0),
+                    Vec2::new(foot.width(), content_h),
+                ),
+                Layout::top_down(Align::Center),
             )
         } else {
-            Rect::from_min_size(
-                Pos2::new(foot.left(), foot.bottom() - 26.0),
-                Vec2::new(foot.width(), 26.0),
+            (
+                Rect::from_min_size(
+                    Pos2::new(foot.left(), foot.bottom() - btn_h),
+                    Vec2::new(foot.width(), btn_h),
+                ),
+                Layout::left_to_right(Align::Center),
             )
         };
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(btn).layout(layout));
         if self.elevated {
-            let gx = if narrow { btn.center().x } else { btn.left() + 9.0 };
-            icons::glyph(
-                ui.painter(),
-                Rect::from_center_size(Pos2::new(gx, btn.center().y), Vec2::splat(13.0)),
-                Glyph::Shield,
-                t.ok,
-                t,
-            );
+            let (r, resp) = child.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+            icons::draw(child.painter(), r, Glyph::Shield, t.status.success);
             if narrow {
-                ui.interact(btn, Id::new("elev-state"), Sense::hover())
-                    .on_hover_text("Running as administrator");
+                azur::components::tooltip(resp, "Running as administrator");
             } else {
-                ui.painter().text(
-                    Pos2::new(btn.left() + 21.0, btn.center().y),
-                    Align2::LEFT_CENTER,
-                    "Administrator",
-                    t.fonts.small.clone(),
-                    t.text_dim,
+                child.add(
+                    Text::new("Administrator")
+                        .variant(TextVariant::Caption)
+                        .color(TextColor::Secondary),
                 );
             }
         } else {
-            let resp = ui.interact(btn, Id::new("elevate"), Sense::click());
-            let hov = resp.hovered();
-            ui.painter().rect_filled(
-                btn,
-                t.radius_sm,
-                if hov { t.surface_hi } else { t.surface },
-            );
-            let gx = if narrow { btn.center().x } else { btn.left() + 14.0 };
-            icons::glyph(
-                ui.painter(),
-                Rect::from_center_size(Pos2::new(gx, btn.center().y), Vec2::splat(13.0)),
-                Glyph::Shield,
-                t.warn,
-                t,
-            );
-            if !narrow {
-                ui.painter().text(
-                    Pos2::new(btn.left() + 26.0, btn.center().y),
-                    Align2::LEFT_CENTER,
-                    "Run as administrator",
-                    t.fonts.small.clone(),
-                    if hov { t.text } else { t.text_dim },
-                );
-            }
-            if resp.clicked() {
-                self.do_action(Action::Elevate, &Snapshot::default());
-            }
-            resp.on_hover_text(
-                "Restart elevated to see all processes and to end protected ones",
-            );
-        }
-    }
-
-    /// The search field: a hand-drawn frame with a bare `TextEdit` inside.
-    ///
-    /// Placed at an explicit rect and deliberately *not* through
-    /// `scope_builder`: pointing a child `Ui` at a rect that starts behind the
-    /// parent's layout cursor rewinds that cursor, and the buttons after it then
-    /// draw on top of the field.
-    fn search_field(&mut self, ui: &mut Ui, rect: Rect) {
-        let t = &self.theme;
-        let focused = ui.memory(|m| m.has_focus(Id::new("filter-edit")));
-
-        ui.painter().rect_filled(rect, t.radius_sm, t.surface);
-        ui.painter().rect_stroke(
-            rect,
-            t.radius_sm,
-            Stroke::new(1.0, if focused { t.accent } else { t.border }),
-            egui::StrokeKind::Inside,
-        );
-        icons::glyph(
-            ui.painter(),
-            Rect::from_center_size(
-                Pos2::new(rect.left() + 16.0, rect.center().y),
-                Vec2::splat(13.0),
-            ),
-            Glyph::Search,
-            t.text_faint,
-            t,
-        );
-
-        // egui positions a galley from the top of the widget's rect, and a font's
-        // row height is not symmetric around its ink (the line gap sits above
-        // the ascender). Measuring the ink against the magnifier glyph -- drawn
-        // exactly on the field's centre line -- put the text 1.5px high, but
-        // correcting by the full amount reads high next to the placeholder's
-        // descenders. The net is half a pixel *down*: negative, hence the sign.
-        const TEXT_BASELINE_NUDGE: f32 = -0.5;
-        let inner = Rect::from_min_max(
-            Pos2::new(rect.left() + 28.0, rect.top() + 1.0 - TEXT_BASELINE_NUDGE),
-            Pos2::new(rect.right() - 24.0, rect.bottom() - 1.0 - TEXT_BASELINE_NUDGE),
-        );
-        // Deliberately not `ui.put`: that justifies the widget to fill the rect,
-        // and a stretched `TextEdit` draws its text (and hint) from the top, so
-        // both sat visibly high. A `left_to_right(Align::Center)` child instead
-        // gives the widget its natural height and centres it.
-        let resp = ui
-            .scope_builder(
-                egui::UiBuilder::new()
-                    .max_rect(inner)
-                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                |ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.filter)
-                            .id(Id::new("filter-edit"))
-                            // The rounded frame above is ours, so the widget
-                            // contributes no chrome of its own.
-                            .frame(egui::Frame::NONE)
-                            .hint_text("Filter by name, PID, publisher…")
-                            .desired_width(inner.width()),
+            // Subtle, not primary: elevating is a detour, and the accent belongs
+            // to the action a reader came here for.
+            let clicked = if narrow {
+                child
+                    .add(
+                        IconButton::new(&icons::icon::shield)
+                            .variant(Variant::Subtle)
+                            .size(Size::Small)
+                            .tooltip("Restart elevated to see all processes"),
                     )
-                },
-            )
-            .inner;
-
-        // Ctrl+F focuses the box; Esc clears it.
-        if ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::F)) {
-            resp.request_focus();
+                    .clicked()
+            } else {
+                child
+                    .add(
+                        Button::new("Run as administrator")
+                            .variant(Variant::Subtle)
+                            .size(Size::Small)
+                            .icon(&icons::icon::shield)
+                            .full_width(true),
+                    )
+                    .on_hover_text("Restart elevated to see all processes and to end protected ones")
+                    .clicked()
+            };
+            elevate = clicked;
         }
-        if resp.has_focus()
-            && ui.input(|i| i.key_pressed(egui::Key::Escape))
-            && !self.filter.is_empty()
-        {
-            self.filter.clear();
-        }
+        elevate
+    }
 
-        if !self.filter.is_empty() {
-            let clear = Rect::from_center_size(
-                Pos2::new(rect.right() - 14.0, rect.center().y),
-                Vec2::splat(18.0),
-            );
-            let cr = ui.interact(clear, Id::new("clear-filter"), Sense::click());
-            icons::glyph(
-                ui.painter(),
-                clear.shrink(4.0),
-                Glyph::Close,
-                if cr.hovered() { t.text } else { t.text_faint },
-                t,
-            );
-            if cr.clicked() {
-                self.filter.clear();
-            }
+    /// The command row: the filter, whatever the tab puts next to it, and the
+    /// sampling cadence on the right.
+    fn toolbar(&mut self, ui: &mut Ui, snap: &Snapshot, action: &mut Option<Action>) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = space::S2;
+
+            // Everything variable goes inside one scope, so that what follows it
+            // cannot be renumbered.
+            //
+            // egui gives a widget an id from its position in the row, so the group
+            // pinned to the right end — which keeps the same rect on every tab — used
+            // to take a new id whenever the filter field or a tab's own buttons came
+            // or went. A rect that stays put while its id changes is what
+            // `warn_if_rect_changes_id` draws a red border around in a debug build,
+            // and it means the control's state is dropped with it. A child scope
+            // advances the parent's counter by exactly one however many widgets it
+            // holds (`egui::Ui`, `IdSource::Child`), so the right-hand group is always
+            // this row's second child and keeps its identity.
+            ui.scope(|ui| {
+                if self.tab.searchable() {
+                    // Never let the field grow into the cadence group on the right,
+                    // and never shrink it below something you can read a needle in.
+                    let w = (ui.available_width() - 300.0).clamp(120.0, 260.0);
+                    let field = ui.add(
+                        SearchBox::new(&mut self.filter)
+                            .placeholder("Filter by name, PID, publisher…")
+                            .size(Size::Small)
+                            .width(w),
+                    );
+                    // Ctrl+F or F3 focuses the box; Esc clears it. Both, because
+                    // both are what Windows taught: Ctrl+F in an application,
+                    // F3 in Explorer and in the shell. Non-short-circuiting `|`
+                    // so the second is consumed whether or not the first fired.
+                    //
+                    // Only reachable while the field is on screen, since this
+                    // whole block is behind `Tab::searchable` -- a shortcut that
+                    // focuses nothing would be a key that seems not to work.
+                    let focus = ui.input_mut(|i| {
+                        i.consume_key(egui::Modifiers::CTRL, egui::Key::F)
+                            | i.consume_key(egui::Modifiers::NONE, egui::Key::F3)
+                    });
+                    if focus {
+                        field.request_focus();
+                    }
+                    if field.has_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Escape))
+                        && !self.filter.is_empty()
+                    {
+                        self.filter.clear();
+                    }
+                }
+
+                self.toolbar_left(ui, snap, action);
+            });
+
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = space::S2;
+                self.toolbar_right(ui);
+            });
+        });
+    }
+
+    /// The process the inspector is about: whatever the active list has selected.
+    ///
+    /// The name comes along because the panel is docked *under* the list and has to
+    /// say which row it belongs to -- with the keyboard moving the selection, the
+    /// two can otherwise be read as unrelated.
+    fn inspected(&self, snap: &Snapshot) -> (Option<u32>, Option<String>) {
+        let key = match self.tab {
+            Tab::Processes => self.processes.selected,
+            Tab::Details => self.details.selected,
+            _ => None,
+        };
+        match key.and_then(|k| snap.find_by_key(k)) {
+            Some(i) => (
+                Some(snap.procs[i].pid),
+                Some(snap.procs[i].name.to_string()),
+            ),
+            None => (None, None),
         }
     }
 
-    fn toolbar(&mut self, ui: &mut Ui, snap: &Snapshot, action: &mut Option<Action>) {
-        // Everything is positioned from explicit rects so the row sits at the
-        // same height on every tab, including Performance, which has no search
-        // field.
-        let row0 = ui.available_rect_before_wrap();
-        // Reserved on the right for the update-speed group. The full 300px pays
-        // for the caption and a Refresh button; below ~560px of row there is not
-        // room for both that and a usable filter box, so the group keeps only
-        // what it needs and drops the caption (see `toolbar_right`).
-        let right_w = if row0.width() < 560.0 { 116.0 } else { 300.0 };
-
-        // One height for every control in the toolbar. egui sizes a button or a
-        // combo as `max(text + 2 * button_padding.y, interact_size.y)`, which
-        // lands on 27px with the default spacing -- one pixel shy of the
-        // hand-drawn search field. Raising `interact_size.y` to the same value
-        // makes the clamp the deciding term for all of them, so field, buttons
-        // and combo end up pixel-identical instead of nearly identical.
-        ui.spacing_mut().interact_size.y = CONTROL_H;
-
-        let row = row0;
-        let top = row.top() + ((row.height() - CONTROL_H) * 0.5).max(0.0);
-        let mut x = row.left();
-
-        if self.tab.searchable() {
-            // Never let the field grow into the reserved right-hand group, and
-            // never shrink it below something you can read a needle in.
-            let avail = row.width() - right_w - 12.0;
-            let w = 250.0f32.min(avail).max(90.0);
-            let field = Rect::from_min_size(Pos2::new(x, top), Vec2::new(w, CONTROL_H));
-            self.search_field(ui, field);
-            x = field.right() + 8.0;
+    /// The inspector's latch, on the cadence end of the toolbar.
+    ///
+    /// A latched `IconButton` rather than a labelled one: it is a view control, not
+    /// a command, and the accent-subtle fill a pressed icon button takes is the
+    /// design system's way of saying a mode is on. The panel it opens says what it
+    /// is in its own tabs, so the button does not have to.
+    fn inspector_toggle(&mut self, ui: &mut Ui) {
+        if ui
+            .add(
+                IconButton::new(&icons::icon::bottom_panel)
+                    .variant(Variant::Subtle)
+                    .size(Size::Small)
+                    .pressed(self.inspector_open)
+                    .tooltip("Modules, handles and threads of the selected process (Alt+D)"),
+            )
+            .clicked()
+        {
+            self.inspector_open = !self.inspector_open;
         }
-
-        let left = Rect::from_min_max(
-            Pos2::new(x, top),
-            Pos2::new((row.right() - right_w).max(x), top + CONTROL_H),
-        );
-        if left.width() > 40.0 {
-            ui.scope_builder(
-                egui::UiBuilder::new()
-                    .max_rect(left)
-                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                |ui| self.toolbar_left(ui, snap, action),
-            );
-        }
-
-        let right = Rect::from_min_max(
-            Pos2::new((row.right() - right_w).max(row.left()), top),
-            Pos2::new(row.right(), top + CONTROL_H),
-        );
-        self.toolbar_right(ui, right);
     }
 
     /// Per-tab controls, laid out left to right.
     fn toolbar_left(&mut self, ui: &mut Ui, snap: &Snapshot, action: &mut Option<Action>) {
-        let t = &self.theme;
-        ui.spacing_mut().item_spacing.x = 6.0;
-        {
-            match self.tab {
-                Tab::Processes => {
-                    let sel = self.processes.selected;
-                    let target = sel.and_then(|k| snap.find_by_key(k));
-                    let enabled = target.is_some();
-                    if ui
-                        .add_enabled(enabled, egui::Button::new("End task"))
-                        .clicked()
-                    {
-                        if let Some(i) = target {
-                            *action = Some(Action::EndTask {
-                                pid: snap.procs[i].pid,
-                                name: snap.procs[i].name.to_string(),
-                            });
-                        }
-                    }
-                    // Grouping is no longer a button: it follows the sort (see
-                    // `ProcessesTab::grouped`). Expand/collapse-all are gone
-                    // too -- the tree is per-row and the keyboard covers it.
-                    if self.processes.grouped() {
-                        ui.label(
-                            egui::RichText::new("Grouped by type")
-                                .small()
-                                .color(t.text_faint),
-                        )
-                        .on_hover_text(
-                            "Sorting by Name groups into Apps and Background processes; \
-                             sorting by any other column lists every process flat",
-                        );
+        match self.tab {
+            Tab::Processes => {
+                let sel = self.processes.selected;
+                let target = sel.and_then(|k| snap.find_by_key(k));
+                // Secondary, not danger: it is the one button in the window that
+                // destroys something, but it is also the one on this toolbar and it
+                // sits there whether or not a row is selected. A red fill above a
+                // list you are reading is an alarm about nothing -- the confirmation
+                // is where the weight belongs.
+                if ui
+                    .add_enabled(
+                        target.is_some(),
+                        Button::new("End task")
+                            .variant(Variant::Secondary)
+                            .size(Size::Small),
+                    )
+                    .clicked()
+                {
+                    if let Some(i) = target {
+                        *action = Some(Action::EndTask {
+                            pid: snap.procs[i].pid,
+                            name: snap.procs[i].name.to_string(),
+                        });
                     }
                 }
-                Tab::Details => {
-                    let sel = self.details.selected;
-                    let target = sel.and_then(|k| snap.find_by_key(k));
-                    if ui
-                        .add_enabled(target.is_some(), egui::Button::new("End task"))
-                        .clicked()
-                    {
-                        if let Some(i) = target {
-                            *action = Some(Action::EndTask {
-                                pid: snap.procs[i].pid,
-                                name: snap.procs[i].name.to_string(),
-                            });
-                        }
-                    }
-                }
-                Tab::Services => {
-                    let (total, running) = self.services.count();
-                    ui.label(
-                        egui::RichText::new(format!("{running} running / {total} total"))
-                            .small()
-                            .color(t.text_dim),
-                    );
-                }
-                Tab::Startup => {
-                    let (total, enabled) = self.startup.count();
-                    ui.label(
-                        egui::RichText::new(format!("{enabled} enabled / {total} total"))
-                            .small()
-                            .color(t.text_dim),
-                    );
-                }
-                Tab::Performance => {}
+                // Grouping follows the sort (see `ProcessesTab::grouped`) rather
+                // than a control, and the group headings in the list say so
+                // themselves -- a badge repeating it was one more thing to read.
             }
+            Tab::Details => {
+                let sel = self.details.selected;
+                let target = sel.and_then(|k| snap.find_by_key(k));
+                if ui
+                    .add_enabled(
+                        target.is_some(),
+                        Button::new("End task")
+                            .variant(Variant::Secondary)
+                            .size(Size::Small),
+                    )
+                    .clicked()
+                {
+                    if let Some(i) = target {
+                        *action = Some(Action::EndTask {
+                            pid: snap.procs[i].pid,
+                            name: snap.procs[i].name.to_string(),
+                        });
+                    }
+                }
+            }
+            Tab::Services => {
+                let (total, running) = self.services.count();
+                ui.add(
+                    Badge::new(format!("{running} running"))
+                        .small(true)
+                        .variant(BadgeVariant::Success),
+                );
+                ui.add(Badge::new(format!("{total} total")).small(true));
+            }
+            Tab::Startup => {
+                // The one control on this tab, so it reads as the primary action
+                // rather than as a destructive one: nothing is lost either way,
+                // and the entry can be switched straight back.
+                let target = self.startup.selected_entry().cloned();
+                let label = match &target {
+                    Some(e) if e.enabled => "Disable",
+                    _ => "Enable",
+                };
+                let resp = ui.add_enabled(
+                    target.is_some(),
+                    Button::new(label)
+                        .variant(Variant::Primary)
+                        .size(Size::Small),
+                );
+                let resp = match &target {
+                    Some(e) if e.source.needs_admin() && !self.elevated => resp.on_hover_text(
+                        "This entry applies to all users, so changing it needs administrator rights",
+                    ),
+                    _ => resp.on_hover_text("Takes effect at the next sign-in"),
+                };
+                if resp.clicked() {
+                    if let Some(e) = target {
+                        *action = Some(Action::SetStartupEnabled {
+                            enable: !e.enabled,
+                            entry: Box::new(e),
+                        });
+                    }
+                }
+
+                let (total, enabled) = self.startup.count();
+                ui.add(
+                    Badge::new(format!("{enabled} enabled"))
+                        .small(true)
+                        .variant(BadgeVariant::Success),
+                );
+                ui.add(Badge::new(format!("{total} total")).small(true));
+            }
+            // Nothing to act on: both are read-outs.
+            Tab::Performance | Tab::Sensors => {}
         }
     }
 
-    /// Update-speed and manual refresh, positioned from explicit rects.
-    ///
-    /// Laid out by hand rather than with a `right_to_left` layout because
-    /// egui's combo box is not vertically centred by its parent: `button_frame`
-    /// anchors it to the *top* of the available rect and then grows it to at
-    /// least `interact_size.y`. Next to a layout-centred `Button` that put the
-    /// two controls a few pixels out of line. Sharing one explicit top edge
-    /// makes them agree.
-    fn toolbar_right(&mut self, ui: &mut Ui, area: Rect) {
-        const COMBO_W: f32 = 96.0;
-        const BUTTON_W: f32 = 72.0;
-
-        let faint = self.theme.text_faint;
-        let cy = area.center().y;
-        let top = cy - CONTROL_H * 0.5;
-        let mut right = area.right();
-
-        // --- update-speed combo (rightmost) -------------------------------
-        //
-        // The popup entries must stay narrower than COMBO_W. egui's combo popup
-        // runs `set_min_width(available_width())` with wrapping disabled, so an
-        // entry wider than the button grows the popup, which grows
-        // `available_width`, which grows the popup again: it never settles and a
-        // scrollbar flickers in and out. Short labels keep the text inside;
-        // `theme::list_items` keeps hover from adding width of its own.
-        let combo_rect =
-            Rect::from_min_size(Pos2::new(right - COMBO_W, top), Vec2::new(COMBO_W, CONTROL_H));
-        ui.scope_builder(
-            egui::UiBuilder::new()
-                .max_rect(combo_rect)
-                .layout(egui::Layout::left_to_right(egui::Align::Min)),
-            |ui| {
-                egui::ComboBox::from_id_salt("rate")
-                    .selected_text(self.speed().label())
-                    .width(COMBO_W)
-                    .show_ui(ui, |ui| {
-                        crate::ui::theme::list_items(ui, &self.theme);
-                        for opt in Speed::ALL {
-                            if ui
-                                .selectable_label(self.speed() == opt, opt.label())
-                                .clicked()
-                            {
-                                match opt {
-                                    Speed::Paused => self.mon.set_paused(true),
-                                    _ => {
-                                        self.mon.set_paused(false);
-                                        self.mon.set_interval(opt.interval_ms());
-                                    }
-                                }
-                            }
-                        }
-                    })
-                    .response
-                    .on_hover_text("How often the machine is sampled");
-            },
+    /// The sampling cadence, added right to left.
+    fn toolbar_right(&mut self, ui: &mut Ui) {
+        let mut picked = Speed::ALL
+            .iter()
+            .position(|s| *s == self.speed())
+            .or(Some(1));
+        let response = ui.add(
+            Select::new(&mut picked)
+                .options(Speed::ALL.map(|s| s.label()))
+                // The chronometer carries what the caption used to say: the
+                // field is about how often, not about what. 20px wider than the
+                // bare trigger, which is the icon and its gap -- the value keeps
+                // the room it had.
+                .icon(&icons::icon::stopwatch)
+                // Subtle: nothing on this end of the toolbar has a border, so a
+                // filled field here would be the loudest thing on a strip whose
+                // job is to stay out of the way. The chevron says it opens.
+                .variant(Variant::Subtle)
+                .size(Size::Small)
+                .width(124.0),
         );
-        right = combo_rect.left() - 8.0;
+        if response.changed() {
+            match picked.map(|i| Speed::ALL[i]) {
+                Some(Speed::Paused) => self.mon.set_paused(true),
+                Some(opt) => {
+                    self.mon.set_paused(false);
+                    self.mon.set_interval(opt.interval_ms());
+                }
+                None => {}
+            }
+        }
+        // The icon says "time" but not which direction, so the tooltip carries
+        // the sentence the caption used to.
+        azur::components::tooltip(response, "Update speed: how often the machine is sampled");
 
-        // --- caption --------------------------------------------------------
-        //
-        // First thing to go in a narrow window: the combo below it already reads
-        // "Normal" or "Paused", which is enough to know what it controls.
-        let caption = "Update speed";
-        let galley =
-            ui.painter()
-                .layout_no_wrap(caption.to_owned(), self.theme.fonts.small.clone(), faint);
-        let cap_w = galley.size().x;
-        if right - cap_w >= area.left() {
-            ui.painter().galley(
-                Pos2::new(right - cap_w, cy - galley.size().y * 0.5),
-                galley,
-                faint,
-            );
-            right -= cap_w + 10.0;
+        // Sampling on its own cadence makes this a no-op that happens to work, so
+        // the button exists only while paused -- a control that does nothing is
+        // worse than no control. F5 still samples whatever the cadence is.
+        // Beside the cadence picker because that is what it overrides.
+        if self.mon.is_paused()
+            && ui
+                .add(
+                    IconButton::new(&icons::icon::refresh)
+                        .variant(Variant::Subtle)
+                        .size(Size::Small)
+                        .tooltip("Sample now (F5)"),
+                )
+                .clicked()
+        {
+            self.mon.refresh_now();
         }
 
-        // --- manual refresh --------------------------------------------------
-        //
-        // Only while paused. Sampling on its own cadence makes the button a
-        // no-op that happens to work, and a control that does nothing visible
-        // is worse than no control; paused is exactly when it is the only way
-        // to get a fresh reading. F5 still works either way.
-        if self.mon.is_paused() && right - BUTTON_W >= area.left() {
-            let btn_rect = Rect::from_min_size(
-                Pos2::new(right - BUTTON_W, top),
-                Vec2::new(BUTTON_W, CONTROL_H),
-            );
-            if ui
-                .put(btn_rect, egui::Button::new("Refresh"))
-                .on_hover_text("Sample immediately (F5)")
-                .clicked()
-            {
-                self.mon.refresh_now();
-            }
+        // Last in a right-to-left run, so it sits to the left of the cadence group:
+        // a view control belongs with the other view controls rather than beside End
+        // task, which is a command and the one destructive thing in the window.
+        if matches!(self.tab, Tab::Processes | Tab::Details) {
+            self.inspector_toggle(ui);
         }
     }
 
@@ -903,102 +849,118 @@ impl App {
 
     fn status_bar(&mut self, ui: &mut Ui, snap: &Snapshot) {
         let t = &self.theme;
-        let rect = ui.available_rect_before_wrap();
-        ui.painter().rect_filled(rect, CornerRadius::ZERO, t.nav);
+        // `max_rect`, not `available_rect_before_wrap`: the strip has to be the
+        // whole panel whatever the row inside it measures, or the table above would
+        // take the difference and paint over the seam.
+        let strip = ui.max_rect();
         ui.painter()
-            .hline(rect.x_range(), rect.top() + 0.5, Stroke::new(1.0, t.border_soft));
+            .rect_filled(strip, azur::desktop::structural_radius(), t.bg.layer);
+        // The seam that divides it from the view above. Drawn here rather than with
+        // `chrome_edge`, which puts its line under a panel; this one goes on top.
+        ui.painter().hline(
+            strip.x_range(),
+            strip.top() + azur::desktop::SEAM * 0.5,
+            egui::Stroke::new(azur::desktop::SEAM, azur::desktop::seam(t)),
+        );
 
-        let y = rect.center().y;
-        let mut x = rect.left() + 12.0;
-
-        // A toast takes over the left side while it is alive.
-        let toast_alive = self
-            .toast
-            .as_ref()
-            .is_some_and(|to| to.at.elapsed() < Duration::from_secs(6));
-        if !toast_alive {
-            self.toast = None;
-        }
-
-        if let Some(to) = &self.toast {
-            let color = if to.error { t.crit } else { t.ok };
-            let galley = ui.painter().layout_no_wrap(
-                fmt::elide(&to.text, 120).into_owned(),
-                t.fonts.small.clone(),
-                color,
-            );
-            let w = galley.size().x;
-            ui.painter()
-                .galley(Pos2::new(x, y - galley.size().y * 0.5), galley, color);
-            x += w;
-        } else {
-            let mut b = String::new();
-            fmt::integer(&mut b, snap.cpu.processes as u64);
-            let procs = b.clone();
-            fmt::integer(&mut b, snap.cpu.threads as u64);
-            let threads = b.clone();
-            fmt::integer(&mut b, snap.cpu.handles as u64);
-            let handles = b.clone();
-
-            let mut mem = String::new();
-            fmt::bytes(&mut mem, snap.mem.in_use);
-            let mut memt = String::new();
-            fmt::bytes(&mut memt, snap.mem.total);
-
-            // Modes first, then counts. A frozen or paused list otherwise just
-            // looks like the app has stopped, and those are exactly the labels a
-            // narrow window would drop if they came last.
-            let limit = rect.right() - 12.0;
-            if self.order_frozen {
-                x = status_pair(ui, t, x, y, limit, "", "Order held (Ctrl)", t.accent);
-            }
-            if self.mon.is_paused() {
-                x = status_pair(ui, t, x, y, limit, "", "Paused", t.warn);
-            }
-            for (label, value, color) in [
-                ("Processes", procs.as_str(), t.text),
-                ("Threads", threads.as_str(), t.text_dim),
-                ("Handles", handles.as_str(), t.text_dim),
-            ] {
-                x = status_pair(ui, t, x, y, limit, label, value, color);
-            }
-            x = status_pair(
-                ui,
-                t,
-                x,
-                y,
-                limit,
-                "CPU",
-                &format!("{:.1}%", snap.cpu.total),
-                t.load_text(snap.cpu.total),
-            );
-            x = status_pair(ui, t, x, y, limit, "Memory", &format!("{mem} / {memt}"), t.text);
-        }
-
-        // Right: our own cost. Sub-millisecond frames are the whole point of the
-        // direct-painting table, so the number is on permanent display -- but not
-        // at the price of overprinting the counts on the left, which is what
-        // happened once the window could be narrowed to 500px. `x` is where the
-        // left group ended, so the two can be checked against each other.
+        // Our own cost, on the right. Sub-millisecond frames are the whole point
+        // of the direct-painting table, so the number is on permanent display --
+        // and it is measured first so the counts on the left know how much room
+        // they have to give up.
         let perf = format!(
             "frame {:.2} ms  (peak {:.2})   sample {} ms",
             self.frame_ms,
             self.frame_ms_peak,
             self.mon.interval()
         );
-        let galley = ui
+        let perf_w = ui
             .painter()
-            .layout_no_wrap(perf, t.fonts.small.clone(), t.text_faint);
-        if rect.right() - 12.0 - galley.size().x > x + 12.0 {
-            ui.painter().galley(
-                Pos2::new(
-                    rect.right() - 12.0 - galley.size().x,
-                    y - galley.size().y * 0.5,
-                ),
-                galley,
-                t.text_faint,
+            .layout_no_wrap(perf.clone(), t.fonts.caption.clone(), t.text.tertiary)
+            .size()
+            .x;
+
+        // `horizontal_centered`, not `horizontal`: it centres the caption in the
+        // strip, and it makes the row claim the panel's full height. A `Frame`
+        // reserves what its *content* measured, so a 16px row in a 24px panel
+        // handed the 8px difference back -- and the table below took it and
+        // painted over the seam.
+        ui.horizontal_centered(|ui| {
+            ui.spacing_mut().item_spacing.x = space::S2;
+            ui.add_space(space::S2);
+
+            // Modes first, then counts. A frozen or paused list otherwise just
+            // looks like the app has stopped, and those are exactly the labels a
+            // narrow window would drop if they came last.
+            if self.order_frozen {
+                ui.add(
+                    Badge::new("Order held (Ctrl)")
+                        .small(true)
+                        .variant(BadgeVariant::Accent),
+                );
+            }
+            if self.mon.is_paused() {
+                ui.add(
+                    Badge::new("Paused")
+                        .small(true)
+                        .variant(BadgeVariant::Warning),
+                );
+            }
+
+            let mut b = String::new();
+            fmt::integer(&mut b, snap.cpu.processes as u64);
+            status_pair(ui, t, perf_w, "Processes", &b, t.text.primary);
+            fmt::integer(&mut b, snap.cpu.threads as u64);
+            status_pair(ui, t, perf_w, "Threads", &b, t.text.secondary);
+            fmt::integer(&mut b, snap.cpu.handles as u64);
+            status_pair(ui, t, perf_w, "Handles", &b, t.text.secondary);
+
+            status_pair(
+                ui,
+                t,
+                perf_w,
+                "CPU",
+                &format!("{:.1}%", snap.cpu.total),
+                t.load_text(snap.cpu.total),
             );
-        }
+            let mut mem = String::new();
+            fmt::bytes(&mut mem, snap.mem.in_use);
+            let mut memt = String::new();
+            fmt::bytes(&mut memt, snap.mem.total);
+            status_pair(
+                ui,
+                t,
+                perf_w,
+                "Memory",
+                &format!("{mem} / {memt}"),
+                t.text.primary,
+            );
+        });
+
+        // The readout is *painted*, not added as a widget.
+        //
+        // It never interacts, and as a widget it was the one thing in this row whose
+        // rect never moved while its id did: egui numbers widgets by the order they
+        // are added, `status_pair` drops pairs as the row narrows — which is what the
+        // rail expanding does — and everything after a dropped pair is renumbered.
+        // A rect that stays put while its id changes is what
+        // `warn_if_rect_changes_id` paints a two-pixel red border around, and that
+        // option is on in every debug build. Naming the group does not help: a child
+        // `Ui` mixes the parent's running counter into its id by design, so it is
+        // renumbered along with everything else (`egui::Ui`, `IdSource::Child`).
+        //
+        // Rounded, because a fractional edge is what the sibling `show_unaligned`
+        // warning is for, and this is the one text in the strip placed by hand.
+        let strip = ui.max_rect();
+        ui.painter().text(
+            Pos2::new(
+                (strip.right() - space::S2).round(),
+                strip.center().y.round(),
+            ),
+            Align2::RIGHT_CENTER,
+            &perf,
+            t.fonts.caption.clone(),
+            t.text.tertiary,
+        );
     }
 
     // -----------------------------------------------------------------
@@ -1033,6 +995,13 @@ impl App {
                 self.clipboard = Some(text);
                 Ok(format!("Copied {n} characters."))
             }
+            Action::SetStartupEnabled { entry, enable } => {
+                let result = crate::sys::startup::set_enabled(&entry, enable);
+                // Re-read the registry rather than assume the write took: if it
+                // was refused, the row must keep saying what Windows says.
+                self.startup.invalidate();
+                result
+            }
             Action::Elevate => match actions::relaunch_elevated() {
                 Ok(_) => {
                     // The elevated instance is starting; this one should go.
@@ -1055,11 +1024,11 @@ impl App {
     }
 
     fn toast(&mut self, text: String, error: bool) {
-        self.toast = Some(Toast {
-            text,
-            error,
-            at: Instant::now(),
-        });
+        self.toaster.push(Toast::new(text).intent(if error {
+            Intent::Danger
+        } else {
+            Intent::Success
+        }));
     }
 }
 
@@ -1082,8 +1051,8 @@ impl Speed {
         Speed::Paused,
     ];
 
-    /// Kept short: these strings must fit inside the combo button's width, or
-    /// egui's popup sizing oscillates (see `toolbar_right`).
+    /// Kept short: these are the options of a fixed-width `Select`, and a label
+    /// wider than the trigger truncates rather than widening it.
     fn label(self) -> &'static str {
         match self {
             Self::High => "High",
@@ -1106,43 +1075,38 @@ impl Speed {
     }
 }
 
-/// Draw a `Label  value` pair and return the x to continue at.
-/// Draw a `label value` pair and return where the next one starts.
+/// Add a `label value` pair to the status bar, or nothing at all.
 ///
-/// Skips the pair entirely if it would not fit before `limit`, and returns `x`
-/// unchanged. Dropping a whole pair reads as "there is no room for this"; letting
-/// it clip reads as a rendering fault, which is what a 500px window used to look
-/// like.
-#[allow(clippy::too_many_arguments)]
-fn status_pair(
-    ui: &Ui,
-    t: &Theme,
-    x: f32,
-    y: f32,
-    limit: f32,
-    label: &str,
-    value: &str,
-    color: Color32,
-) -> f32 {
-    let p = ui.painter();
-    let lg = p.layout_no_wrap(label.to_owned(), t.fonts.small.clone(), t.text_faint);
-    let vg = p.layout_no_wrap(value.to_owned(), t.fonts.small.clone(), color);
-    let lw = lg.size().x;
-    let vw = vg.size().x;
-    let gap = if label.is_empty() { 0.0 } else { 6.0 };
-    if x + lw + gap + vw > limit {
-        return x;
+/// `reserve` is the width the frame-cost readout needs on the right. A pair that
+/// would not fit before it is dropped whole: that reads as "there is no room for
+/// this", where letting it clip reads as a rendering fault -- which is what a
+/// 500px window used to look like.
+fn status_pair(ui: &mut Ui, t: &Theme, reserve: f32, label: &str, value: &str, color: Color32) {
+    let width = |s: &str| {
+        ui.painter()
+            .layout_no_wrap(s.to_owned(), t.fonts.caption.clone(), color)
+            .size()
+            .x
+    };
+    if ui.available_width() - reserve < width(label) + width(value) + space::S5 {
+        return;
     }
-
-    p.galley(Pos2::new(x, y - lg.size().y * 0.5), lg, t.text_faint);
-    p.galley(Pos2::new(x + lw + gap, y - vg.size().y * 0.5), vg, color);
-
-    x + lw + gap + vw + 24.0
+    ui.add(
+        Text::new(label)
+            .variant(TextVariant::Caption)
+            .color(TextColor::Tertiary),
+    );
+    ui.add(
+        Text::new(value.to_owned())
+            .variant(TextVariant::Caption)
+            .explicit_color(color),
+    );
+    ui.add_space(space::S3);
 }
 
 impl eframe::App for App {
     fn clear_color(&self, _v: &egui::Visuals) -> [f32; 4] {
-        self.theme.bg.to_normalized_gamma_f32()
+        self.theme.bg.canvas.to_normalized_gamma_f32()
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
@@ -1171,6 +1135,12 @@ impl eframe::App for App {
         }
 
         self.icons.pump(&ctx);
+        // A menu belongs to a moment: click into another window with one open and
+        // egui would keep it there, pinned over content it no longer describes --
+        // over a selection, in the case of a context menu, that the click may have
+        // changed. Nothing here latches a popup's state itself, so the answer is
+        // not needed.
+        let _ = azur::desktop::close_popups_on_blur(&ctx);
         let mut action: Option<Action> = None;
         // Ctrl freezes the row order on the table tabs; mirrored here so the
         // status bar can say so.
@@ -1181,6 +1151,14 @@ impl eframe::App for App {
         ctx.input_mut(|i| {
             if i.consume_key(egui::Modifiers::NONE, egui::Key::F5) {
                 self.mon.refresh_now();
+            }
+            // Alt+D toggles the inspector, on the tabs that have one. Consumed
+            // whatever the tab, so it never reaches a text field as a character on
+            // the tabs where it would do nothing.
+            if i.consume_key(egui::Modifiers::ALT, egui::Key::D)
+                && matches!(self.tab, Tab::Processes | Tab::Details)
+            {
+                self.inspector_open = !self.inspector_open;
             }
             if i.consume_key(egui::Modifiers::NONE, egui::Key::Delete) {
                 let key = match self.tab {
@@ -1199,6 +1177,41 @@ impl eframe::App for App {
 
         let theme = Theme::dark();
 
+        // --- window chrome -------------------------------------------------
+        //
+        // The platform's caption is off (see `main`), so the title bar is Azur's:
+        // 32px of `background-layer` with the window buttons at the end.
+        egui::Panel::top("title")
+            .exact_size(row::TITLE_BAR)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(egui::Frame::NONE)
+            .show(ui, |ui| {
+                match TitleBar::new("Azur Task Manager")
+                    // The product mark, not a nav glyph — and the same geometry the
+                    // taskbar button and the `.exe` in Explorer are rasterised from,
+                    // because both come out of the design system's `marks.rs`.
+                    .icon(&marks::task_manager)
+                    .maximized(self.maximized)
+                    .show(ui)
+                {
+                    Some(TitleBarAction::Close) => {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    Some(TitleBarAction::Minimize) => {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                    }
+                    Some(TitleBarAction::Maximize) | Some(TitleBarAction::Restore) => {
+                        self.maximized = !self.maximized;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(self.maximized));
+                    }
+                    Some(TitleBarAction::Drag) => {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    }
+                    None => {}
+                }
+            });
+
         // Paint-path bisect, present only in a memtrace build.
         #[cfg(feature = "memtrace")]
         let level = crate::memtrace::ui_level();
@@ -1207,14 +1220,26 @@ impl eframe::App for App {
             return;
         }
 
+        // The rail owns its two widths (220px, or 48px collapsed); the panel asks
+        // it rather than repeating them.
+        let mut probe = 0usize;
+        let rail_w = NavigationRail::new(&mut probe)
+            .collapsed(self.nav_collapsed)
+            .width();
+        let mut elevate = false;
         egui::Panel::left("nav")
-            .exact_size(if self.nav_collapsed { NAV_W_NARROW } else { NAV_W })
+            .exact_size(rail_w)
             .resizable(false)
             .show_separator_line(false)
-            .frame(egui::Frame::NONE)
+            // A structural panel: `background-layer`, square, unringed, and no
+            // margin of its own. The rail paints the seam down its own right edge.
+            .frame(azur::desktop::panel(&theme))
             .show(ui, |ui| {
-                self.nav_rail(ui, snap);
+                elevate = self.nav_rail(ui, snap);
             });
+        if elevate {
+            self.do_action(Action::Elevate, &Snapshot::default());
+        }
 
         #[cfg(feature = "memtrace")]
         if level < 2 {
@@ -1222,7 +1247,7 @@ impl eframe::App for App {
         }
 
         egui::Panel::bottom("status")
-            .exact_size(28.0)
+            .exact_size(STATUS_H)
             .resizable(false)
             .show_separator_line(false)
             .frame(egui::Frame::NONE)
@@ -1230,18 +1255,26 @@ impl eframe::App for App {
                 self.status_bar(ui, snap);
             });
 
-        egui::Panel::top("toolbar")
-            .exact_size(46.0)
+        // The strip is a panel like the rail: its own fill, square, and divided
+        // from the view below by a seam rather than by a gap. `space-2` at the
+        // sides so the filter box starts where the table's first column does, and
+        // `PANEL_PAD_Y` above and below to keep the controls off the seam.
+        let bar = egui::Panel::top("toolbar")
+            .exact_size(TOOLBAR_H)
             .resizable(false)
             .show_separator_line(false)
-            .frame(
-                egui::Frame::NONE
-                    .fill(theme.bg)
-                    .inner_margin(egui::Margin::symmetric(12, 8)),
-            )
+            // `space-3` at the sides, which is the same 8px the table insets its
+            // cell text by, so the filter box starts where the first column does.
+            .frame(azur::desktop::panel(&theme).inner_margin(egui::Margin::symmetric(
+                space::S3 as i8,
+                PANEL_PAD_Y as i8,
+            )))
             .show(ui, |ui| {
                 self.toolbar(ui, snap, &mut action);
             });
+        // The panel's own rect, not the `Ui`'s: inside the closure the margin has
+        // already been taken off, and the seam belongs to the panel's edge.
+        azur::components::chrome_edge(ui, bar.response.rect);
 
         #[cfg(feature = "memtrace")]
         if level < 3 {
@@ -1250,16 +1283,69 @@ impl eframe::App for App {
 
         egui::CentralPanel::default()
             .frame(
-                egui::Frame::NONE
-                    .fill(theme.bg)
-                    .inner_margin(egui::Margin {
-                        left: 12,
-                        right: 12,
-                        top: 0,
-                        bottom: 8,
-                    }),
+                // A table is the window's structure and runs to its edges: no
+                // margin, and the seams above and below it are the toolbar's and
+                // the status bar's. The two card tabs are the other case -- a card
+                // floats on the canvas, so the canvas has to show around it.
+                egui::Frame::NONE.inner_margin(if self.tab.tabular() {
+                    egui::Margin::ZERO
+                } else {
+                    // `space-3`, the same 8px the toolbar keeps at its sides and the
+                    // table insets its first column by: one line down the window's
+                    // left edge whatever the tab.
+                    egui::Margin::same(space::S3 as i8)
+                }),
             )
-            .show(ui, |ui| match self.tab {
+            .show(ui, |ui| {
+                // The inspector takes the bottom of whichever list tab is up, before
+                // the list claims the rest -- so the list shrinks and the panel is
+                // docked to it rather than floating over it. Resizable, because how
+                // much of a process table you are willing to give up to see its
+                // threads is not something this app can decide for you.
+                if self.inspector_open && matches!(self.tab, Tab::Processes | Tab::Details) {
+                    let (pid, name) = self.inspected(snap);
+                    let view = ui.available_height();
+                    // `default_size` is consulted only when egui has no remembered
+                    // size for this panel, which is the first time it is shown in a
+                    // session and never again -- so half the view to begin with, and
+                    // from then on the height the reader dragged it to, held in egui's
+                    // own panel state for as long as the process lives. Unchanged by a
+                    // tab change, a new sample, a reopen; gone at the next launch,
+                    // because none of it is written to the settings file.
+                    //
+                    // `max_size` is the one thing that overrules it, and it is a clamp
+                    // rather than a resize: the list keeps `LIST_MIN_H` when the window
+                    // is too short for both.
+                    let panel = egui::Panel::bottom("inspector")
+                        .default_size(view * inspector::FIRST_SHARE)
+                        .min_size(inspector::min_h())
+                        .max_size((view - inspector::LIST_MIN_H).max(inspector::min_h()))
+                        .resizable(true)
+                        .show_separator_line(false)
+                        .frame(azur::desktop::panel(&theme))
+                        .show(ui, |ui| {
+                            self.inspector.ui(
+                                ui,
+                                &theme,
+                                pid,
+                                name.as_deref(),
+                                snap.generation,
+                                &mut action,
+                            )
+                        });
+                    if panel.inner {
+                        self.inspector_open = false;
+                    }
+                    // The seam that welds it to the list above, and the height to
+                    // remember for next time.
+                    let rect = panel.response.rect;
+                    ui.painter().hline(
+                        rect.x_range(),
+                        rect.top() + azur::desktop::SEAM * 0.5,
+                        egui::Stroke::new(azur::desktop::SEAM, azur::desktop::seam(&theme)),
+                    );
+                }
+                match self.tab {
                 Tab::Processes => self.processes.ui(
                     ui,
                     &theme,
@@ -1278,11 +1364,25 @@ impl eframe::App for App {
                     &mut action,
                 ),
                 Tab::Performance => self.perf.ui(ui, &theme, snap),
+                Tab::Sensors => self.sensors.ui(ui, &theme, snap),
                 Tab::Services => {
                     self.services.ui(ui, &theme, snap, &self.filter, &mut action)
                 }
-                Tab::Startup => self.startup.ui(ui, &theme, &self.filter),
+                Tab::Startup => self.startup.ui(ui, &theme, &self.filter, &mut action),
+                }
             });
+
+        // The window's resize edges, after the panels that would otherwise cover
+        // them.
+        //
+        // A borderless window has none of its own: `with_decorations(false)` is what
+        // lets this app draw Azur's `TitleBar`, and the frame it gives up includes
+        // the eight strips Windows resizes by. `WS_THICKFRAME` survives, so the
+        // window looks resizable to the shell, but every pixel of it — measured with
+        // `WM_NCHITTEST` at all four edges and the corners — answers `HTCLIENT`, and
+        // Windows never begins a drag. These are `Order::Middle` areas that set the
+        // right cursor and hand the drag back to the window manager.
+        azur::components::resize_handles(&ctx);
 
         // Actions run after painting, so they never mutate state the frame is
         // still reading.
@@ -1290,6 +1390,8 @@ impl eframe::App for App {
             self.dispatch(a, snap);
         }
         self.confirm_dialog(&ctx, snap);
+        // Toasts paint over everything, so they go last.
+        self.toaster.show(&ctx);
 
         if let Some(text) = self.clipboard.take() {
             ctx.copy_text(text);
@@ -1326,5 +1428,77 @@ impl eframe::App for App {
     /// two-second delay while running, so a kill still loses at most that.
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.settings.flush();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// A bottom panel is only as tall as its content claims, and the inspector's
+    /// content has to claim it -- which is the bug behind "the panel does not open at
+    /// half the view" and "I cannot resize it when nothing is selected", both at once.
+    ///
+    /// `default_size` sizes the box the content lays out in; the height egui keeps is
+    /// the one the content's frame measured, floored at `min_size`. A panel that only
+    /// paints therefore collapses to that floor and springs back from every drag,
+    /// because the dragged size is stored and then overruled by the content again on
+    /// the next frame. This measures both halves of it.
+    #[test]
+    fn a_panel_is_only_as_tall_as_its_content_claims() {
+        fn height(claim: bool) -> (f32, f32) {
+            let ctx = egui::Context::default();
+            crate::ui::theme::install(&ctx);
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
+            let (mut got, mut asked) = (0.0, 0.0);
+            // Three passes: the first stores the panel state, and a height that only
+            // holds for one frame is not a height.
+            for _ in 0..3 {
+                let input = egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                };
+                let _ = ctx.run_ui(input, |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        let view = ui.available_height();
+                        asked = view * 0.5;
+                        got = egui::Panel::bottom("probe")
+                            .default_size(asked)
+                            .min_size(109.0)
+                            .max_size(view - 150.0)
+                            .resizable(true)
+                            .show(ui, |ui| {
+                                if claim {
+                                    ui.set_min_height(ui.available_height());
+                                }
+                                // Painting only, as the inspector's note does when no
+                                // process is selected.
+                                ui.painter().text(
+                                    ui.max_rect().center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    "note",
+                                    egui::FontId::proportional(14.0),
+                                    egui::Color32::WHITE,
+                                );
+                            })
+                            .response
+                            .rect
+                            .height();
+                        ui.label("the list below it");
+                    });
+                });
+            }
+            (asked, got)
+        }
+
+        // Without the claim: the floor, whatever it was opened at.
+        let (asked, got) = height(false);
+        assert!(asked > 300.0, "the probe asked for {asked}, so it proves nothing");
+        assert_eq!(got, 109.0);
+
+        // With it: what it asked for, to within the pixel round.
+        let (asked, got) = height(true);
+        assert!(
+            (got - asked).abs() <= 1.0,
+            "asked for {asked}, got {got}"
+        );
     }
 }

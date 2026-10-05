@@ -6,18 +6,10 @@
 //! Task Manager reads too. Everything here degrades to "no GPU tab" rather than
 //! failing the app: these counters are absent in some VMs and on some drivers.
 
+use super::pdh::{Counter, Query};
 use super::snapshot::GpuStats;
-use super::util::{from_wide_nul, wide};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
-
-use windows_sys::Win32::System::Performance::{
-    PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
-    PdhOpenQueryW, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY,
-};
-
-const PDH_CSTATUS_VALID_DATA: u32 = 0;
-const PDH_MORE_DATA: u32 = 0x8000_07D2;
 
 /// `\GPU Engine(*)\Utilization Percentage`
 const PATH_ENGINE: &str = r"\GPU Engine(*)\Utilization Percentage";
@@ -26,76 +18,8 @@ const PATH_DEDICATED: &str = r"\GPU Adapter Memory(*)\Dedicated Usage";
 /// `\GPU Adapter Memory(*)\Shared Usage`
 const PATH_SHARED: &str = r"\GPU Adapter Memory(*)\Shared Usage";
 
-struct Counter {
-    handle: PDH_HCOUNTER,
-    buf: Vec<u8>,
-}
-
-impl Counter {
-    fn add(query: PDH_HQUERY, path: &str) -> Option<Self> {
-        let wpath = wide(path);
-        let mut handle: PDH_HCOUNTER = std::ptr::null_mut();
-        let rc = unsafe { PdhAddEnglishCounterW(query, wpath.as_ptr(), 0, &mut handle) };
-        (rc == 0).then_some(Self {
-            handle,
-            buf: vec![0u8; 16 * 1024],
-        })
-    }
-
-    /// Read the counter's instances as `(instance_name, value)` pairs.
-    fn read(&mut self, out: &mut Vec<(String, f64)>) {
-        out.clear();
-        for _ in 0..3 {
-            let mut size = self.buf.len() as u32;
-            let mut count = 0u32;
-            let rc = unsafe {
-                PdhGetFormattedCounterArrayW(
-                    self.handle,
-                    PDH_FMT_DOUBLE,
-                    &mut size,
-                    &mut count,
-                    self.buf.as_mut_ptr().cast(),
-                )
-            };
-
-            if rc == PDH_MORE_DATA {
-                self.buf.resize((size as usize).max(self.buf.len() * 2), 0);
-                continue;
-            }
-            if rc != 0 {
-                return;
-            }
-
-            let items = self.buf.as_ptr().cast::<PDH_FMT_COUNTERVALUE_ITEM_W>();
-            for i in 0..count as usize {
-                let item: PDH_FMT_COUNTERVALUE_ITEM_W =
-                    unsafe { std::ptr::read_unaligned(items.add(i)) };
-                if item.FmtValue.CStatus != PDH_CSTATUS_VALID_DATA || item.szName.is_null() {
-                    continue;
-                }
-                // szName points into `self.buf`, after the item array.
-                let name = unsafe { read_pwstr(item.szName) };
-                // SAFETY: CStatus == VALID_DATA means the union holds a double.
-                let value = unsafe { item.FmtValue.Anonymous.doubleValue };
-                out.push((name, value));
-            }
-            return;
-        }
-    }
-}
-
-unsafe fn read_pwstr(p: *const u16) -> String {
-    let mut len = 0usize;
-    // Instance names are short; the bound just prevents a runaway on a
-    // malformed buffer.
-    while len < 512 && *p.add(len) != 0 {
-        len += 1;
-    }
-    from_wide_nul(std::slice::from_raw_parts(p, len))
-}
-
 pub struct GpuProbe {
-    query: PDH_HQUERY,
+    query: Query,
     engine: Option<Counter>,
     dedicated: Option<Counter>,
     shared: Option<Counter>,
@@ -113,22 +37,16 @@ pub struct GpuProbe {
 impl GpuProbe {
     /// Returns `None` when the GPU counter set is unavailable.
     pub fn new() -> Option<Self> {
-        let mut query: PDH_HQUERY = std::ptr::null_mut();
-        if unsafe { PdhOpenQueryW(std::ptr::null(), 0, &mut query) } != 0 {
-            return None;
-        }
+        let query = Query::open()?;
 
-        let engine = Counter::add(query, PATH_ENGINE);
-        if engine.is_none() {
-            // No GPU Engine counter set -> nothing meaningful to show.
-            unsafe { PdhCloseQuery(query) };
-            return None;
-        }
-        let dedicated = Counter::add(query, PATH_DEDICATED);
-        let shared = Counter::add(query, PATH_SHARED);
+        // No GPU Engine counter set -> nothing meaningful to show. The other two
+        // are allowed to be missing; this one is the tab.
+        let engine = Some(Counter::add(&query, PATH_ENGINE)?);
+        let dedicated = Counter::add(&query, PATH_DEDICATED);
+        let shared = Counter::add(&query, PATH_SHARED);
 
         // A rate counter needs two collections before it yields a value.
-        unsafe { PdhCollectQueryData(query) };
+        query.collect();
 
         let adapters = super::dxgi::enumerate()
             .into_iter()
@@ -156,13 +74,13 @@ impl GpuProbe {
         [&self.engine, &self.dedicated, &self.shared]
             .iter()
             .filter_map(|c| c.as_ref())
-            .map(|c| c.buf.capacity())
+            .map(|c| c.buf_bytes())
             .sum::<usize>()
             + self.items.capacity() * std::mem::size_of::<(String, f64)>()
     }
 
     pub fn sample(&mut self, out: &mut Vec<GpuStats>) {
-        if unsafe { PdhCollectQueryData(self.query) } != 0 {
+        if !self.query.collect() {
             return;
         }
         // The first collection after construction only primes the counters.
@@ -259,6 +177,7 @@ impl GpuProbe {
 
             out.push(GpuStats {
                 name,
+                vendor: self.adapters.get(luid).map(|a| a.vendor_id).unwrap_or(0),
                 utilization,
                 dedicated_used: dedicated.get(luid).copied().unwrap_or(0.0).max(0.0) as u64,
                 dedicated_total: self
@@ -267,14 +186,10 @@ impl GpuProbe {
                     .map(|a| a.dedicated_video_memory)
                     .unwrap_or(0),
                 shared_used: shared.get(luid).copied().unwrap_or(0.0).max(0.0) as u64,
+                // Filled in by the sampler once the sensor backends have run.
+                sensors: super::snapshot::NO_SENSORS,
             });
         }
-    }
-}
-
-impl Drop for GpuProbe {
-    fn drop(&mut self) {
-        unsafe { PdhCloseQuery(self.query) };
     }
 }
 

@@ -5,7 +5,6 @@
 //! specific Segoe glyph set (where a wrong codepoint renders as a tofu box) and
 //! keeps them crisp at any DPI.
 
-use super::theme::Theme;
 use crate::sys::icon::{IconLoader, ICON_SIZE};
 use egui::{Color32, Painter, Pos2, Rect, Stroke, Vec2};
 use rustc_hash::FxHashMap;
@@ -143,15 +142,65 @@ pub enum Glyph {
     Details,
     Services,
     Startup,
-    Search,
-    Close,
     Shield,
     /// Panel outline with a filled left column: the sidebar toggle.
     Sidebar,
+    /// Panel outline with a filled bottom strip: the inspector toggle.
+    BottomPanel,
+    /// A circular arrow: sample now.
+    Refresh,
+    /// A chronometer: the sampling cadence.
+    Stopwatch,
+    /// A dial with a needle: the sensors.
+    Gauge,
+}
+
+/// The glyphs as `azur_egui_theme::icons::Icon` functions.
+///
+/// A component that takes an icon takes `&dyn Fn(&Painter, Rect, Color32)`, which
+/// is [`draw`] with the glyph already chosen — so `NavItem`, `CommandItem`,
+/// `MenuItem` and `IconButton` can all carry this app's own artwork.
+pub mod icon {
+    use super::{draw, Glyph};
+    use egui::{Color32, Painter, Rect};
+
+    pub fn processes(p: &Painter, rect: Rect, color: Color32) {
+        draw(p, rect, Glyph::Processes, color);
+    }
+    pub fn performance(p: &Painter, rect: Rect, color: Color32) {
+        draw(p, rect, Glyph::Performance, color);
+    }
+    pub fn details(p: &Painter, rect: Rect, color: Color32) {
+        draw(p, rect, Glyph::Details, color);
+    }
+    pub fn services(p: &Painter, rect: Rect, color: Color32) {
+        draw(p, rect, Glyph::Services, color);
+    }
+    pub fn startup(p: &Painter, rect: Rect, color: Color32) {
+        draw(p, rect, Glyph::Startup, color);
+    }
+    pub fn shield(p: &Painter, rect: Rect, color: Color32) {
+        draw(p, rect, Glyph::Shield, color);
+    }
+    pub fn sidebar(p: &Painter, rect: Rect, color: Color32) {
+        draw(p, rect, Glyph::Sidebar, color);
+    }
+    pub fn bottom_panel(p: &Painter, rect: Rect, color: Color32) {
+        draw(p, rect, Glyph::BottomPanel, color);
+    }
+    pub fn refresh(p: &Painter, rect: Rect, color: Color32) {
+        draw(p, rect, Glyph::Refresh, color);
+    }
+    pub fn stopwatch(p: &Painter, rect: Rect, color: Color32) {
+        draw(p, rect, Glyph::Stopwatch, color);
+    }
+    pub fn gauge(p: &Painter, rect: Rect, color: Color32) {
+        draw(p, rect, Glyph::Gauge, color);
+    }
 }
 
 /// Draw a 16x16-ish glyph centred in `rect`.
-pub fn glyph(painter: &Painter, rect: Rect, g: Glyph, color: Color32, _t: &Theme) {
+pub fn draw(painter: &Painter, rect: Rect, g: Glyph, color: Color32) {
     let c = rect.center();
     let s = rect.width().min(rect.height()) * 0.5;
     let stroke = Stroke::new(1.5, color);
@@ -243,37 +292,6 @@ pub fn glyph(painter: &Painter, rect: Rect, g: Glyph, color: Color32, _t: &Theme
                 Stroke::new(1.4, color.gamma_multiply(0.6)),
             );
         }
-        Glyph::Search => {
-            painter.circle_stroke(
-                Pos2::new(c.x - s * 0.15, c.y - s * 0.15),
-                s * 0.55,
-                Stroke::new(1.5, color),
-            );
-            painter.add(egui::Shape::line_segment(
-                [
-                    Pos2::new(c.x + s * 0.28, c.y + s * 0.28),
-                    Pos2::new(c.x + s * 0.8, c.y + s * 0.8),
-                ],
-                stroke,
-            ));
-        }
-        Glyph::Close => {
-            let d = s * 0.55;
-            painter.add(egui::Shape::line_segment(
-                [
-                    Pos2::new(c.x - d, c.y - d),
-                    Pos2::new(c.x + d, c.y + d),
-                ],
-                stroke,
-            ));
-            painter.add(egui::Shape::line_segment(
-                [
-                    Pos2::new(c.x + d, c.y - d),
-                    Pos2::new(c.x - d, c.y + d),
-                ],
-                stroke,
-            ));
-        }
         // A panel with its left column filled in: what the button does, drawn
         // rather than described. Reads the same collapsed or expanded, so the
         // control does not appear to change identity when clicked.
@@ -293,6 +311,105 @@ pub fn glyph(painter: &Painter, rect: Rect, g: Glyph, color: Color32, _t: &Theme
                 egui::CornerRadius::same(1),
                 color,
             );
+        }
+        // The same panel as `Sidebar`, filled along the bottom instead: what the
+        // inspector does to the view it opens in. Built from the same rect and the
+        // same 1px inset, so the two toggles read as one family of control.
+        Glyph::BottomPanel => {
+            let r = Rect::from_center_size(c, Vec2::new(s * 1.75, s * 1.5));
+            painter.rect_stroke(
+                r,
+                egui::CornerRadius::same(2),
+                Stroke::new(1.3, color),
+                egui::StrokeKind::Inside,
+            );
+            painter.rect_filled(
+                Rect::from_min_max(
+                    Pos2::new(r.left() + 1.0, r.bottom() - s * 0.55),
+                    Pos2::new(r.right() - 1.0, r.bottom() - 1.0),
+                ),
+                egui::CornerRadius::same(1),
+                color,
+            );
+        }
+        // An open circle with an arrowhead on the end: re-sample.
+        Glyph::Refresh => {
+            let r = s * 0.72;
+            // Leave a gap at the top-right for the head, so the ring reads as an
+            // arrow rather than as a letter O.
+            let arc: Vec<Pos2> = (0..=22)
+                .map(|i| {
+                    let a = -std::f32::consts::FRAC_PI_4
+                        + std::f32::consts::TAU * 0.82 * i as f32 / 22.0;
+                    Pos2::new(c.x + a.cos() * r, c.y + a.sin() * r)
+                })
+                .collect();
+            painter.add(egui::Shape::line(arc, Stroke::new(1.4, color)));
+            let tip = Pos2::new(c.x + r * 0.71, c.y - r * 0.71);
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    Pos2::new(tip.x - s * 0.1, tip.y - s * 0.45),
+                    Pos2::new(tip.x + s * 0.45, tip.y - s * 0.1),
+                    Pos2::new(tip.x - s * 0.35, tip.y + s * 0.3),
+                ],
+                color,
+                Stroke::NONE,
+            ));
+        }
+        // A dial: 240 degrees of arc with a needle at two thirds, which is what
+        // the tab it opens is full of.
+        Glyph::Gauge => {
+            let r = s * 0.8;
+            // Open at the bottom, so it reads as a gauge rather than a clock.
+            let arc: Vec<Pos2> = (0..=16)
+                .map(|i| {
+                    let a = std::f32::consts::PI * (0.8 + 1.4 * i as f32 / 16.0);
+                    Pos2::new(c.x + a.cos() * r, c.y + s * 0.2 + a.sin() * r)
+                })
+                .collect();
+            painter.add(egui::Shape::line(arc, Stroke::new(1.4, color)));
+            let a = std::f32::consts::PI * 1.75;
+            painter.add(egui::Shape::line_segment(
+                [
+                    Pos2::new(c.x, c.y + s * 0.2),
+                    Pos2::new(c.x + a.cos() * r * 0.8, c.y + s * 0.2 + a.sin() * r * 0.8),
+                ],
+                Stroke::new(1.5, color),
+            ));
+            painter.circle_filled(Pos2::new(c.x, c.y + s * 0.2), s * 0.14, color);
+        }
+        // A chronometer: how often the machine is sampled.
+        //
+        // A plain clock would do for "time", but the crown is what says *elapsed*
+        // time -- which is what a sampling interval is.
+        Glyph::Stopwatch => {
+            let r = s * 0.72;
+            // The dial sits low in the box to leave room for the crown above it,
+            // so the glyph still centres on the box as a whole.
+            let dial = Pos2::new(c.x, c.y + s * 0.16);
+            painter.circle_stroke(dial, r, Stroke::new(1.4, color));
+
+            let crown = dial.y - r - s * 0.32;
+            painter.add(egui::Shape::line_segment(
+                [Pos2::new(c.x, crown), Pos2::new(c.x, dial.y - r)],
+                Stroke::new(1.5, color),
+            ));
+            painter.hline(
+                egui::Rangef::new(c.x - s * 0.26, c.x + s * 0.26),
+                crown,
+                Stroke::new(1.5, color),
+            );
+
+            // Two hands, one at twelve and one short of four. A single hand reads
+            // as a compass needle; two read as a watch.
+            painter.add(egui::Shape::line_segment(
+                [dial, Pos2::new(dial.x, dial.y - r * 0.62)],
+                Stroke::new(1.4, color),
+            ));
+            painter.add(egui::Shape::line_segment(
+                [dial, Pos2::new(dial.x + r * 0.44, dial.y + r * 0.3)],
+                Stroke::new(1.3, color),
+            ));
         }
         // Shield: elevation state.
         Glyph::Shield => {

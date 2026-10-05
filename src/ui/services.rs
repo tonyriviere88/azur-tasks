@@ -3,6 +3,9 @@
 use super::fmt;
 use super::table::{Align, Column, Table};
 use super::theme::Theme;
+use azur_egui_theme::components::{
+    menu_divider, ContextMenu, MenuItem, Text, TextColor, TextVariant,
+};
 use crate::sys::services::{self, Service, ServiceState};
 use crate::sys::snapshot::Snapshot;
 use egui::{Id, Ui};
@@ -25,6 +28,10 @@ pub struct ServicesTab {
     built_filter: String,
     dirty: bool,
     scratch: String,
+    /// The folder-opening target for the row the context menu is on, resolved when
+    /// the menu opens: a service's image path is a registry read and a walk down a
+    /// command line, neither of which belongs in every frame.
+    menu_path: Option<String>,
 }
 
 impl ServicesTab {
@@ -36,8 +43,7 @@ impl ServicesTab {
             Column::new(C_STATE, "Status", 96.0, Align::Left),
             Column::new(C_GROUP, "Group", 160.0, Align::Left),
         ];
-        let mut table = Table::new(cols, C_NAME, false);
-        table.row_h = 24.0;
+        let table = Table::new(cols, C_NAME, false);
         Self {
             table,
             services: Vec::new(),
@@ -47,6 +53,7 @@ impl ServicesTab {
             built_filter: String::new(),
             dirty: true,
             scratch: String::new(),
+            menu_path: None,
         }
     }
 
@@ -151,30 +158,30 @@ impl ServicesTab {
                 let s = &services[order[rp.row] as usize];
                 for (slot, &cid) in vis.iter().enumerate() {
                     match cid {
-                        C_NAME => rp.text(slot, &s.name, t.text, Align::Left),
+                        C_NAME => rp.text(slot, &s.name, t.text.primary, Align::Left),
                         C_PID => {
                             if s.pid == 0 {
-                                rp.text(slot, "—", t.text_faint, Align::Right);
+                                rp.text(slot, "—", t.text.tertiary, Align::Right);
                             } else {
                                 fmt::integer(&mut buf, s.pid as u64);
-                                rp.text_font(slot, &buf, t.text_dim, Align::Right, &t.fonts.mono);
+                                rp.text_font(slot, &buf, t.text.secondary, Align::Right, &t.fonts.mono);
                             }
                         }
-                        C_DESC => rp.text(slot, &s.display_name, t.text_dim, Align::Left),
+                        C_DESC => rp.text(slot, &s.display_name, t.text.secondary, Align::Left),
                         C_STATE => {
                             let (fg, bg) = match s.state {
-                                ServiceState::Running => (t.ok, t.ok.gamma_multiply(0.18)),
+                                ServiceState::Running => (t.status.success, t.status.success.gamma_multiply(0.18)),
                                 ServiceState::Stopped => {
-                                    (t.text_faint, t.text_faint.gamma_multiply(0.14))
+                                    (t.text.tertiary, t.text.tertiary.gamma_multiply(0.14))
                                 }
-                                ServiceState::Pending => (t.warn, t.warn.gamma_multiply(0.18)),
+                                ServiceState::Pending => (t.status.warning, t.status.warning.gamma_multiply(0.18)),
                             };
                             rp.pill(slot, s.state.label(), fg, bg);
                         }
                         C_GROUP => rp.text(
                             slot,
                             s.group.as_deref().unwrap_or("—"),
-                            t.text_faint,
+                            t.text.tertiary,
                             Align::Left,
                         ),
                         _ => {}
@@ -188,6 +195,10 @@ impl ServicesTab {
         if let Some(r) = out.clicked_row.or(out.context_row) {
             self.selected = Some(r);
         }
+        if let Some(r) = super::table::list_nav(ui, self.selected, order.len()) {
+            self.selected = Some(r);
+            self.table.scroll_to_row = Some(r);
+        }
 
         // A running service maps onto a process, so offer the same jump.
         let hosting_pid = out
@@ -197,10 +208,21 @@ impl ServicesTab {
             .map(|&i| self.services[i as usize].pid)
             .filter(|&p| p != 0);
 
-        out.response.context_menu(|ui| {
+        // Cleared as well as set: right-clicking below the last row opens the menu
+        // with no service under it.
+        if out.response.secondary_clicked() {
+            self.menu_path = out
+                .context_row
+                .and_then(|r| order.get(r))
+                .and_then(|&i| services::image_path(&self.services[i as usize].name))
+                .and_then(|cmd| crate::sys::actions::executable_of(&cmd));
+        }
+        let menu_path = self.menu_path.clone();
+
+        ContextMenu::new(&out.response).show(&ui.ctx().clone(), |ui| {
             match hosting_pid {
                 Some(pid) => {
-                    if ui.button("Go to process").clicked() {
+                    if ui.add(MenuItem::new("Go to process")).clicked() {
                         if let Some(p) = snap.procs.iter().find(|p| p.pid == pid) {
                             *action = Some(super::Action::GoToDetails(p.key()));
                         }
@@ -208,19 +230,32 @@ impl ServicesTab {
                     }
                 }
                 None => {
-                    ui.add_enabled(false, egui::Button::new("Go to process"));
+                    ui.add_enabled(false, MenuItem::new("Go to process"));
                 }
             }
-            ui.separator();
-            if ui.button("Refresh now").clicked() {
+            // Where the service's own image lives -- svchost's folder for the many
+            // that are hosted, which is the honest answer: that is the program
+            // Windows starts.
+            let item = ui.add_enabled(menu_path.is_some(), MenuItem::new("Open folder"));
+            if item.clicked() {
+                if let Some(p) = &menu_path {
+                    *action = Some(super::Action::OpenFileLocation { path: p.clone() });
+                }
+                ui.close();
+            }
+            if menu_path.is_none() {
+                item.on_hover_text("This service records no image path on disk");
+            }
+            menu_divider(ui);
+            if ui.add(MenuItem::new("Refresh now")).clicked() {
                 self.last_refresh = None;
                 ui.close();
             }
-            ui.separator();
-            ui.label(
-                egui::RichText::new("Starting and stopping services requires elevation")
-                    .small()
-                    .color(t.text_faint),
+            menu_divider(ui);
+            ui.add(
+                Text::new("Starting and stopping services requires elevation")
+                    .variant(TextVariant::Caption)
+                    .color(TextColor::Tertiary),
             );
         });
 

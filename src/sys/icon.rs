@@ -27,7 +27,7 @@ impl IconLoader {
         let (result_tx, rx) = std::sync::mpsc::channel::<IconPixels>();
 
         std::thread::Builder::new()
-            .name("yatm-icons".into())
+            .name("aztm-icons".into())
             .spawn(move || {
                 while let Ok(path) = job_rx.recv() {
                     if let Some(rgba) = extract(&path) {

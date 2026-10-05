@@ -1,12 +1,25 @@
 //! Presentation layer.
 
-pub mod azur_theme;
 pub mod details;
 pub mod fmt;
 pub mod graph;
 pub mod icons;
+pub mod inspector;
+
+/// The application marks, **copied verbatim** from the design system's
+/// `app-icons/marks.rs`.
+///
+/// It is a copy on purpose rather than a module of `azur-egui-theme`: the marks are
+/// the design source for four separate applications and belong beside the artwork
+/// they generate, not in the theme's public API. Because it is byte-identical, a
+/// refresh is a copy and a check is a `diff` — which is also why nothing here edits
+/// it, including to silence the three marks this application does not use.
+#[allow(dead_code)]
+pub mod marks;
+
 pub mod performance;
 pub mod processes;
+pub mod sensors;
 pub mod services;
 pub mod startup;
 pub mod table;
@@ -32,26 +45,43 @@ pub enum Action {
     GoToDetails(ProcKey),
     CopyRow(String),
     Elevate,
+    /// Switch a startup entry on or off. Carries the entry rather than an index:
+    /// actions run after the frame that raised them, by which time the list may
+    /// have been re-enumerated under a different order.
+    SetStartupEnabled {
+        entry: Box<crate::sys::startup::StartupEntry>,
+        enable: bool,
+    },
 }
 
-/// Shared right-click menu for a process row.
+/// Shared right-click menu for a process row, in Azur's menu items.
+///
+/// The priority choices are laid out in this menu rather than in a submenu: six
+/// entries behind a chevron in a menu that already has eight is a worse trade
+/// than a caption and a divider, and a submenu is one more thing to keep open.
 pub fn process_context_menu(
     ui: &mut egui::Ui,
-    t: &Theme,
+    _t: &Theme,
     pid: u32,
     name: &str,
     key: ProcKey,
     path: Option<&str>,
     action: &mut Option<Action>,
 ) {
-    ui.label(
-        egui::RichText::new(fmt::elide(name, 40).as_ref())
-            .small()
-            .color(t.text_dim),
-    );
-    ui.separator();
+    use azur_egui_theme::components::{
+        menu_divider, submenu, MenuItem, Text, TextColor, TextVariant,
+    };
 
-    if ui.button("End task").clicked() {
+    ui.add(
+        Text::new(fmt::elide(name, 40).into_owned())
+            .variant(TextVariant::Caption)
+            .color(TextColor::Secondary),
+    );
+    menu_divider(ui);
+
+    // Destructive first, and marked as such: `danger` paints the label and its
+    // icon in `status-danger`, and tints the row on hover.
+    if ui.add(MenuItem::new("End task").danger(true)).clicked() {
         *action = Some(Action::EndTask {
             pid,
             name: name.to_owned(),
@@ -59,7 +89,7 @@ pub fn process_context_menu(
         ui.close();
     }
     if ui
-        .button("End process tree")
+        .add(MenuItem::new("End process tree").danger(true))
         .on_hover_text("Ends this process and every process it started")
         .clicked()
     {
@@ -67,31 +97,20 @@ pub fn process_context_menu(
         ui.close();
     }
 
-    ui.separator();
+    menu_divider(ui);
 
-    ui.menu_button("Set priority", |ui| {
-        for p in Priority::ALL {
-            if ui.button(p.label()).clicked() {
-                *action = Some(Action::SetPriority {
-                    pid,
-                    name: name.to_owned(),
-                    prio: p,
-                });
-                ui.close();
-            }
-        }
-    });
-
-    if ui.button("Go to details").clicked() {
+    if ui.add(MenuItem::new("Go to details")).clicked() {
         *action = Some(Action::GoToDetails(key));
         ui.close();
     }
 
-    ui.separator();
-
     let has_path = path.is_some_and(|p| !p.is_empty());
+    // "Open folder" rather than Task Manager's "Open file location": every table
+    // that has a path for a row offers this, and one verb across all of them is
+    // worth more than one table's familiar wording. It does the same thing either
+    // way -- opens the containing folder with the file selected.
     if ui
-        .add_enabled(has_path, egui::Button::new("Open file location"))
+        .add_enabled(has_path, MenuItem::new("Open folder"))
         .clicked()
     {
         if let Some(p) = path {
@@ -100,7 +119,7 @@ pub fn process_context_menu(
         ui.close();
     }
     if ui
-        .add_enabled(has_path, egui::Button::new("Properties"))
+        .add_enabled(has_path, MenuItem::new("Properties"))
         .clicked()
     {
         if let Some(p) = path {
@@ -109,7 +128,7 @@ pub fn process_context_menu(
         ui.close();
     }
     if ui
-        .add_enabled(has_path, egui::Button::new("Copy image path"))
+        .add_enabled(has_path, MenuItem::new("Copy image path"))
         .clicked()
     {
         if let Some(p) = path {
@@ -117,9 +136,25 @@ pub fn process_context_menu(
         }
         ui.close();
     }
-    if ui.button("Copy PID").clicked() {
+    if ui.add(MenuItem::new("Copy PID")).clicked() {
         *action = Some(Action::CopyRow(pid.to_string()));
         ui.close();
     }
+
+    menu_divider(ui);
+    submenu(ui, MenuItem::new("Set priority"), |ui| {
+        for p in Priority::ALL {
+            if ui.add(MenuItem::new(p.label())).clicked() {
+                *action = Some(Action::SetPriority {
+                    pid,
+                    name: name.to_owned(),
+                    prio: p,
+                });
+                // Closes the whole stack, parent included: the action is done, and
+                // leaving the menu that raised it standing would be a loose end.
+                ui.close();
+            }
+        }
+    });
 }
 

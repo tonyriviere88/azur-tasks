@@ -1,0 +1,19 @@
+# `cargo deploy` — build the release binary and copy it to where you run it from.
+#
+# An alias can only stand for a cargo subcommand, so it cannot copy anything itself; what it
+# stands for here is a small program that builds and then copies. That program is
+# `azur_egui_theme::deploy`, shared with the other Azur applications, and its documentation
+# explains why it is reached through an example target. `examples/deploy.rs` is one call to it.
+#
+#   cargo deploy                  release build -> D:\Programs (or $AZUR_DEPLOY_DIR)
+#   cargo deploy E:\Tools         somewhere else
+#   cargo deploy --debug          the debug build, for once
+#   cargo deploy --profile fast   the iteration profile
+#
+# `--release` is for building *the helper*, not for choosing what gets deployed — the helper
+# decides that, and defaults to release. It is here so that compiling the helper needs only the
+# dependencies the release build is about to want anyway, rather than a second debug copy of
+# eframe and wgpu on a fresh clone. It is also why the helper is not built under `fast`: a
+# second profile means a second copy of every dependency, which costs more than it saves.
+[alias]
+deploy = "run --quiet --release --example deploy --"

@@ -203,3 +203,37 @@ pub fn format_filetime(ft: i64, with_date: bool) -> String {
         )
     }
 }
+
+// ---------------------------------------------------------------------------
+// Vendor libraries, bound at run time
+// ---------------------------------------------------------------------------
+
+/// Load a DLL that may not be installed.
+///
+/// The GPU sensor interfaces ship with their vendor's display driver: linking
+/// against any of them would refuse to start the app on a machine that has a
+/// different card. Absent means "no sensors from that vendor", not an error.
+pub fn load_dll(name: &str) -> Option<windows_sys::Win32::Foundation::HMODULE> {
+    use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
+    let module = unsafe { LoadLibraryW(wide(name).as_ptr()) };
+    (!module.is_null()).then_some(module)
+}
+
+/// Look up one entry point by name. `name` must be NUL-terminated.
+///
+/// # Safety
+/// The caller states the signature; nothing here can check it. Getting it wrong
+/// is undefined behaviour, so every use sits beside the vendor's own declaration.
+pub unsafe fn dll_symbol<T: Copy>(
+    module: windows_sys::Win32::Foundation::HMODULE,
+    name: &[u8],
+) -> Option<T> {
+    use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
+    debug_assert_eq!(name.last(), Some(&0), "GetProcAddress needs a C string");
+    debug_assert_eq!(
+        std::mem::size_of::<T>(),
+        std::mem::size_of::<*const std::ffi::c_void>(),
+        "T must be a function pointer"
+    );
+    GetProcAddress(module, name.as_ptr()).map(|p| std::mem::transmute_copy(&p))
+}
