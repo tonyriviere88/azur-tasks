@@ -160,6 +160,13 @@ impl DetailsTab {
         self.dirty = true;
     }
 
+    /// Drop the selection, for Escape. Both halves, for the reason
+    /// [`super::processes::ProcessesTab::clear_selection`] gives.
+    pub fn clear_selection(&mut self) {
+        self.selected = None;
+        self.selected_row = None;
+    }
+
     /// Select a process and scroll it into view (used by "Go to details").
     pub fn reveal(&mut self, key: ProcKey) {
         self.selected = Some(key);

@@ -242,6 +242,12 @@ impl StartupTab {
         self.selected.and_then(|r| self.entry_at(&self.order, r))
     }
 
+    /// Drop the selection, for Escape. This is also what disables the toolbar's
+    /// Enable/Disable button, since it reads [`Self::selected_entry`].
+    pub fn clear_selection(&mut self) {
+        self.selected = None;
+    }
+
     /// Forget the cached enumeration, so the next frame reads the registry again.
     pub fn invalidate(&mut self) {
         self.last_refresh = None;

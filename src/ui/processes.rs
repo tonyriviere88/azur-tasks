@@ -290,6 +290,17 @@ impl ProcessesTab {
         self.dirty = true;
     }
 
+    /// Drop the selection, for Escape.
+    ///
+    /// Both halves, because `selected_row` is only re-derived from `selected` on a
+    /// rebuild: leaving the row index behind would keep one row painted as selected
+    /// with nothing selected, which is the state clicking a section header already
+    /// clears both fields to avoid.
+    pub fn clear_selection(&mut self) {
+        self.selected = None;
+        self.selected_row = None;
+    }
+
     /// Whether the list is split into Apps / Background processes.
     ///
     /// Tied to the sort rather than to a button. Group headers are only useful

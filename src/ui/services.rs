@@ -262,6 +262,12 @@ impl ServicesTab {
         self.order = order;
     }
 
+    /// Drop the selection, for Escape. One field here: this list selects by row, and
+    /// the row is what the "go to the hosting process" jump reads.
+    pub fn clear_selection(&mut self) {
+        self.selected = None;
+    }
+
     pub fn count(&self) -> (usize, usize) {
         let running = self
             .services

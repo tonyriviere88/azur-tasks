@@ -285,7 +285,8 @@ shortcut, so that one lands on the Startup folder with the shortcut selected.
 | → | expand, or step into the subtree |
 | ← | collapse, or step out to the parent |
 | Home / End | first / last row |
-| Ctrl+F | focus the filter; Esc clears it |
+| Ctrl+F, F3 | focus the filter |
+| Esc | clear the filter text if the caret is in the box, otherwise drop the selection |
 | F5 | sample now (works while paused) |
 | Del | end the selected process |
 | Double-click a row | expand / collapse |
@@ -301,6 +302,15 @@ shortcut, so that one lands on the Startup folder with the shortcut selected.
 
 Ordering is frozen by *identity*, not row index: processes that appear during a
 freeze are appended rather than displacing what is on screen.
+
+Escape means one thing at a time, decided in one place at the end of the frame: the
+filter's text if that is where the caret was, otherwise the selection on whichever
+table is showing. A dialog or an open menu gets the key before either of them. What
+makes the first half answerable is that egui drops the focused widget while it reads
+input at the *start* of a pass whenever Escape is among the events — so on that one
+frame every widget in the window reports no focus, and "was the caret in the box?" has
+to come from `lost_focus()` instead. Asking `has_focus()` there is why Escape used to
+leave the filter alone.
 
 Ending a process asks first, and names what it is about to end — including how
 many processes an "end tree" covers. The button that goes through with it holds

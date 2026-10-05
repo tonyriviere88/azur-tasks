@@ -132,6 +132,10 @@ pub struct App {
     mark: AppMark,
     tab: Tab,
     filter: String,
+    /// Whether the filter field had the keyboard focus when this frame's input
+    /// arrived — which is not the same question as `has_focus()`, and the difference
+    /// is the whole reason this exists. See where it is set, and the end of [`Self::ui`].
+    filter_focused: bool,
     elevated: bool,
 
     processes: processes::ProcessesTab,
@@ -210,6 +214,7 @@ impl App {
             mark: AppMark::default(),
             tab: Tab::Processes,
             filter: String::new(),
+            filter_focused: false,
             elevated: actions::is_elevated(),
             processes,
             details,
@@ -610,10 +615,10 @@ impl App {
                             .size(Size::Small)
                             .width(w),
                     );
-                    // Ctrl+F or F3 focuses the box; Esc clears it. Both, because
-                    // both are what Windows taught: Ctrl+F in an application,
-                    // F3 in Explorer and in the shell. Non-short-circuiting `|`
-                    // so the second is consumed whether or not the first fired.
+                    // Ctrl+F or F3 focuses the box. Both, because both are what
+                    // Windows taught: Ctrl+F in an application, F3 in Explorer and in
+                    // the shell. Non-short-circuiting `|` so the second is consumed
+                    // whether or not the first fired.
                     //
                     // Only reachable while the field is on screen, since this
                     // whole block is behind `Tab::searchable` -- a shortcut that
@@ -625,12 +630,18 @@ impl App {
                     if focus {
                         field.request_focus();
                     }
-                    if field.has_focus()
-                        && ui.input(|i| i.key_pressed(egui::Key::Escape))
-                        && !self.filter.is_empty()
-                    {
-                        self.filter.clear();
-                    }
+                    // `lost_focus` as well as `has_focus`, and that pair is what makes
+                    // Escape work at all. egui drops the focused widget while it
+                    // processes input at the *start* of a pass when one of the events
+                    // is Escape (the `Key::Escape` arm of the focus handling in
+                    // `memory/mod.rs`), so on the one frame the answer matters, every
+                    // widget in the window reports `has_focus() == false` -- which is
+                    // what had quietly stopped "Esc clears the filter" from working.
+                    // `lost_focus` is true there instead, because `begin_pass` records
+                    // the previous frame's focus before clearing it.
+                    self.filter_focused = field.has_focus() || field.lost_focus();
+                } else {
+                    self.filter_focused = false;
                 }
 
                 self.toolbar_left(ui, snap, action);
@@ -641,6 +652,21 @@ impl App {
                 self.toolbar_right(ui);
             });
         });
+    }
+
+    /// Drop the selection on whichever tab has one.
+    ///
+    /// Performance's `selected` is not one of these: it names the resource whose graph
+    /// is on screen, which is a view and not a row, and a tab showing nothing would be
+    /// a tab with a hole in it.
+    fn clear_selection(&mut self) {
+        match self.tab {
+            Tab::Processes => self.processes.clear_selection(),
+            Tab::Details => self.details.clear_selection(),
+            Tab::Services => self.services.clear_selection(),
+            Tab::Startup => self.startup.clear_selection(),
+            Tab::Performance | Tab::Sensors => {}
+        }
     }
 
     /// The process the inspector is about: whatever the active list has selected.
@@ -1459,6 +1485,34 @@ impl eframe::App for App {
             self.dispatch(a, snap);
         }
         self.confirm_dialog(&ctx, snap);
+
+        // **Everything Escape means, in one place.** Filter text first, then the
+        // selection -- and the whole policy is here rather than at the two controls it
+        // acts on, because "was the user in the search box?" cannot be answered from
+        // inside the search box on this frame: egui has already dropped the focused
+        // widget by the time any widget runs (see [`Self::filter_focused`]).
+        //
+        // Last in the frame, because two things have a better claim on the key and
+        // both have had their turn by here:
+        //
+        // - a confirmation is a modal, and `egui::Modal` *consumes* Escape to close, so
+        //   this sees nothing. Which is why it sits after `confirm_dialog` rather than
+        //   with the global shortcuts at the top: cancelling a dialog about the selected
+        //   process and deselecting that process are opposite ends of one gesture.
+        // - a context menu closes on Escape but does **not** consume it -- egui's popup
+        //   only tests the key -- so the popup state is what has to be asked instead.
+        //   `any_popup_open` reads this pass, and a menu is drawn during the tab body
+        //   above, so by now it is registered.
+        if !ctx.any_popup_open()
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            if self.filter_focused && !self.filter.is_empty() {
+                self.filter.clear();
+            } else {
+                self.clear_selection();
+            }
+        }
+
         // Toasts paint over everything, so they go last.
         self.toaster.show(&ctx);
 
