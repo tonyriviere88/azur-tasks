@@ -737,7 +737,11 @@ assets/                 every file below reduced from app-source.png
   app-256.png         for this README
 src/
   main.rs             entry point, renderer selection, restored geometry
-  app.rs              shell: Azur title bar, rail, command row, status bar, dispatch
+  app/
+    mod.rs            the App type, construction, the frame, settings sync
+    tabs.rs           Tab, and everything that turns on which one is active
+    chrome.rs         Azur title bar, rail, command row, status bar, cadence
+    actions.rs        performing an Action: confirmation, dispatch, toasts
   settings.rs         %APPDATA% key=value store, hand-parsed
   sys/                data acquisition — knows nothing about the UI
     nt.rs             NtQuerySystemInformation bindings + x64 layout assertions
@@ -748,6 +752,7 @@ src/
     disk.rs net.rs gpu.rs dxgi.rs
     pdh.rs            the little of PDH the counters need, English paths
     sensors.rs        thermal zones, CPU clock and power, and the GPU backends
+    gpu_backend.rs    the one interface a vendor library offers, and the registry
     nvml.rs           NVIDIA, via nvml.dll
     level_zero.rs     Intel, via ze_loader.dll (Level Zero Sysman)
     adl.rs            AMD, via atiadlxx.dll — see Limitations
@@ -756,6 +761,7 @@ src/
     services.rs startup.rs icon.rs actions.rs windows_list.rs util.rs
   ui/
     table.rs          virtualized direct-painting table
+    list.rs           the lifecycle the four table-backed tabs share
     graph.rs          filled line graphs, sparklines, segmented bars
     summary.rs        the machine on one page: resource cards and three rankings
     processes.rs details.rs performance.rs sensors.rs services.rs startup.rs

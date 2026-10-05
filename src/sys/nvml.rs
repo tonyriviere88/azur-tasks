@@ -10,6 +10,7 @@
 //! everywhere else. A machine without it simply has no NVIDIA sensors, and the
 //! tab says so instead of showing zeros.
 
+use super::gpu_backend::GpuBackend;
 use super::snapshot::{vendor, GpuSensors};
 use super::util::{dll_symbol as symbol, load_dll};
 use std::ffi::c_void;
@@ -103,12 +104,15 @@ impl Nvml {
         })
     }
 
-    pub fn device_count(&self) -> u32 {
+}
+
+impl GpuBackend for Nvml {
+    fn device_count(&self) -> u32 {
         self.count
     }
 
     /// Read every sensor of device `i`, skipping the ones it does not have.
-    pub fn read(&self, i: u32) -> Option<GpuSensors> {
+    fn read(&mut self, i: u32) -> Option<GpuSensors> {
         let mut handle: Handle = std::ptr::null_mut();
         if unsafe { (self.by_index)(i, &mut handle) } != 0 || handle.is_null() {
             return None;

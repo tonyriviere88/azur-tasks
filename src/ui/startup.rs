@@ -1,11 +1,12 @@
 //! The Startup tab.
 
+use super::list::{ListTab, NO_GENERATION};
 use super::table::{Align, Column, Table};
 use super::theme::Theme;
 use super::Action;
 use azur_egui_theme::components::{menu_divider, ContextMenu, MenuItem, Text, TextColor, TextVariant};
 use crate::sys::startup::{self, StartupEntry};
-use egui::{Id, Ui};
+use egui::Ui;
 use std::time::{Duration, Instant};
 
 const C_NAME: u16 = 0;
@@ -14,13 +15,14 @@ const C_SOURCE: u16 = 2;
 const C_CMD: u16 = 3;
 
 pub struct StartupTab {
-    pub table: Table,
+    /// Keyed by row index: a startup entry has no identity that survives being
+    /// re-enumerated, so position is the honest answer here. `ListTab` drops the
+    /// selection when the list comes back shorter, which is what makes the toolbar's
+    /// Enable/Disable button grey out rather than act on nothing.
+    pub list: ListTab<usize>,
     entries: Vec<StartupEntry>,
     order: Vec<u32>,
-    selected: Option<usize>,
     last_refresh: Option<Instant>,
-    built_filter: String,
-    dirty: bool,
     /// The folder-opening target for the row the context menu is on, resolved when
     /// the menu opens rather than on every frame it stays open: working out which
     /// part of a command line is the program means looking on disk.
@@ -36,15 +38,11 @@ impl StartupTab {
                 .help("Where Windows reads this entry from"),
             Column::new(C_CMD, "Command", 520.0, Align::Left),
         ];
-        let table = Table::new(cols, C_NAME, false);
         Self {
-            table,
+            list: ListTab::new("startup", Table::new(cols, C_NAME, false)),
             entries: Vec::new(),
             order: Vec::new(),
-            selected: None,
             last_refresh: None,
-            built_filter: String::new(),
-            dirty: true,
             menu_path: None,
         }
     }
@@ -58,17 +56,16 @@ impl StartupTab {
         if stale {
             self.entries = startup::enumerate();
             self.last_refresh = Some(Instant::now());
-            self.dirty = true;
+            self.list.mark_dirty();
         }
     }
 
     fn rebuild(&mut self, filter: &str) {
         self.order.clear();
-        let needle = filter.to_ascii_lowercase();
         for (i, e) in self.entries.iter().enumerate() {
-            if !needle.is_empty() {
-                let hit = e.name.to_ascii_lowercase().contains(&needle)
-                    || e.command.to_ascii_lowercase().contains(&needle);
+            if !filter.is_empty() {
+                let hit = super::fmt::contains_ci(&e.name, filter)
+                    || super::fmt::contains_ci(&e.command, filter);
                 if !hit {
                     continue;
                 }
@@ -78,45 +75,36 @@ impl StartupTab {
 
         let es = &self.entries;
         let v = &mut self.order;
-        match self.table.sort_by {
+        match self.list.table.sort_by {
             C_STATE => v.sort_unstable_by_key(|&i| !es[i as usize].enabled),
             C_SOURCE => v.sort_unstable_by_key(|&i| es[i as usize].source.label()),
             C_CMD => v.sort_unstable_by_key(|&i| es[i as usize].command.to_ascii_lowercase()),
             _ => v.sort_unstable_by_key(|&i| es[i as usize].name.to_ascii_lowercase()),
         }
-        if self.table.sort_desc {
+        if self.list.table.sort_desc {
             v.reverse();
         }
     }
 
     pub fn ui(&mut self, ui: &mut Ui, t: &Theme, filter: &str, action: &mut Option<Action>) {
         self.maybe_refresh();
-        if self.dirty || self.built_filter != filter {
+        if self.list.stale(NO_GENERATION, filter) {
             self.rebuild(filter);
-            self.built_filter = filter.to_owned();
-            self.dirty = false;
+            self.list
+                .built(NO_GENERATION, filter, self.order.len(), Some);
         }
+        self.list.header(ui, t);
 
-        let id = Id::new("startup");
-        if self.table.header(ui, t, id) {
-            self.dirty = true;
-        }
-
-        let order = std::mem::take(&mut self.order);
-        // Hoisted so the row callback does not need `self.table`, which
-        // `Table::body` holds mutably.
-        let vis: Vec<u16> = self
-            .table
-            .cols
-            .iter()
-            .filter(|c| c.visible)
-            .map(|c| c.id)
-            .collect();
-        let entries = std::mem::take(&mut self.entries);
-
-        let out = self
-            .table
-            .body(ui, t, id, order.len(), self.selected, |rp| {
+        // Destructured rather than moved out of `self`: the row closure is handed the
+        // column ids and the buffer, so the only thing left for it to borrow is this
+        // tab's own data. See `ui::list`.
+        let Self {
+            list,
+            entries,
+            order,
+            ..
+        } = self;
+        let out = list.body(ui, t, order.len(), |rp, vis, _buf| {
                 let e = &entries[order[rp.row] as usize];
                 for (slot, &cid) in vis.iter().enumerate() {
                     match cid {
@@ -146,18 +134,11 @@ impl StartupTab {
                 }
             });
 
-        self.entries = entries;
+        self.list.settle(ui, &out, self.order.len(), Some);
 
-        if let Some(r) = out.clicked_row.or(out.context_row) {
-            self.selected = Some(r);
-        }
-        if let Some(r) = super::table::list_nav(ui, self.selected, order.len()) {
-            self.selected = Some(r);
-            self.table.scroll_to_row = Some(r);
-        }
         // Double-click toggles, like flipping a switch in a list of switches.
         if let Some(r) = out.double_clicked_row {
-            if let Some(e) = self.entry_at(&order, r) {
+            if let Some(e) = self.entry_at(r) {
                 *action = Some(Action::SetStartupEnabled {
                     entry: Box::new(e.clone()),
                     enable: !e.enabled,
@@ -166,8 +147,9 @@ impl StartupTab {
         }
 
         let target = self
-            .selected
-            .and_then(|r| self.entry_at(&order, r))
+            .list
+            .selected_row
+            .and_then(|r| self.entry_at(r))
             .cloned();
 
         // Cleared as well as set: a right-click on the empty space below the rows
@@ -176,7 +158,7 @@ impl StartupTab {
         if out.response.secondary_clicked() {
             self.menu_path = out
                 .context_row
-                .and_then(|r| self.entry_at(&order, r))
+                .and_then(|r| self.entry_at(r))
                 .and_then(|e| crate::sys::actions::executable_of(&e.command));
         }
         let menu_path = self.menu_path.clone();
@@ -225,27 +207,24 @@ impl StartupTab {
                 ui.close();
             }
         });
-
-        self.order = order;
     }
 
     /// The entry a visible row stands for.
-    ///
-    /// Takes `order` as an argument because the row callback runs while it is
-    /// moved out of `self`.
-    fn entry_at(&self, order: &[u32], row: usize) -> Option<&StartupEntry> {
-        order.get(row).and_then(|i| self.entries.get(*i as usize))
+    fn entry_at(&self, row: usize) -> Option<&StartupEntry> {
+        self.order
+            .get(row)
+            .and_then(|i| self.entries.get(*i as usize))
     }
 
     /// The selected entry, for the toolbar's Enable/Disable button.
     pub fn selected_entry(&self) -> Option<&StartupEntry> {
-        self.selected.and_then(|r| self.entry_at(&self.order, r))
+        self.list.selected_row.and_then(|r| self.entry_at(r))
     }
 
     /// Drop the selection, for Escape. This is also what disables the toolbar's
     /// Enable/Disable button, since it reads [`Self::selected_entry`].
     pub fn clear_selection(&mut self) {
-        self.selected = None;
+        self.list.clear_selection();
     }
 
     /// Forget the cached enumeration, so the next frame reads the registry again.

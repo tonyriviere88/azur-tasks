@@ -8,6 +8,7 @@ pub mod dxgi;
 pub mod etw;
 pub mod frames;
 pub mod gpu;
+pub mod gpu_backend;
 pub mod icon;
 pub mod inspect;
 pub mod meta;

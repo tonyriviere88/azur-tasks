@@ -6,12 +6,13 @@
 
 use super::fmt;
 use super::icons::IconCache;
+use super::list::ListTab;
 use super::table::{Align, Column, RowPainter, Table};
 use super::theme::Theme;
 use azur_egui_theme::components::{ContextMenu, Text, TextColor, TextVariant};
 use crate::sys::meta::MetaStore;
 use crate::sys::snapshot::{Category, Proc, ProcKey, RunState, Snapshot};
-use egui::{Id, Rect, Ui, Vec2};
+use egui::{Rect, Ui, Vec2};
 use rustc_hash::FxHashSet;
 use std::sync::Arc;
 
@@ -197,7 +198,7 @@ enum Top {
 type TopKey = (u8, f64);
 
 pub struct ProcessesTab {
-    pub table: Table,
+    pub list: ListTab<ProcKey>,
     rows: Vec<Row>,
     /// Processes the user has expanded. Everything starts collapsed, like Task
     /// Manager, so the list opens as a short summary rather than 600 rows.
@@ -206,11 +207,9 @@ pub struct ProcessesTab {
     /// Fold state of the system section, which is not keyed by [`Category`]: no
     /// process is in it.
     system_collapsed: bool,
-    pub selected: Option<ProcKey>,
-    /// Row index of the selection in the current list, for row highlighting.
-    selected_row: Option<usize>,
     /// Grouping used by the list currently built, so a sort change invalidates
-    /// the cache even when nothing else did.
+    /// the cache even when nothing else did. The one cache key `ListTab` does not
+    /// know about, because it is the only tab whose shape turns on its sort column.
     built_grouped: bool,
 
     /// Display position of each process from the last unfrozen rebuild.
@@ -223,23 +222,8 @@ pub struct ProcessesTab {
     /// by. Indexed by [`SysRow`]; `u32::MAX` until a first unfrozen build has
     /// placed them.
     sys_rank: [u32; SysRow::COUNT],
-    /// True while the sort order is held still (Ctrl held down).
-    frozen: bool,
-    /// Set by [`Self::reveal`]; turned into a scroll on the next rebuild, because
-    /// until then there is no row order to scroll to.
-    ///
-    /// A flag and not a key: `reveal` also *selects* the process it is revealing, so
-    /// the rebuild's own hunt for `selected_row` is the lookup a key here would
-    /// repeat.
-    pending_reveal: bool,
-
-    // Cache invalidation.
-    built_generation: u64,
-    built_filter: String,
-    dirty: bool,
 
     // Scratch buffers, reused every frame.
-    scratch: String,
     sort_buf: Vec<u32>,
     stack: Vec<(u32, u16)>,
     matched: Vec<bool>,
@@ -272,22 +256,14 @@ impl ProcessesTab {
             }
         }
         Self {
-            table,
+            list: ListTab::new("processes", table),
             rows: Vec::new(),
             expanded: FxHashSet::default(),
             collapsed_groups: FxHashSet::default(),
             system_collapsed: false,
-            selected: None,
-            selected_row: None,
             built_grouped: true,
             rank: rustc_hash::FxHashMap::default(),
             sys_rank: [u32::MAX; SysRow::COUNT],
-            frozen: false,
-            pending_reveal: false,
-            built_generation: u64::MAX,
-            built_filter: String::new(),
-            dirty: true,
-            scratch: String::new(),
             sort_buf: Vec::new(),
             stack: Vec::new(),
             matched: Vec::new(),
@@ -295,7 +271,7 @@ impl ProcessesTab {
     }
 
     pub fn mark_dirty(&mut self) {
-        self.dirty = true;
+        self.list.mark_dirty();
     }
 
     /// Drop the selection, for Escape.
@@ -305,8 +281,7 @@ impl ProcessesTab {
     /// with nothing selected, which is the state clicking a section header already
     /// clears both fields to avoid.
     pub fn clear_selection(&mut self) {
-        self.selected = None;
-        self.selected_row = None;
+        self.list.clear_selection();
     }
 
     /// Select a process, open whatever is folded over it, and scroll it into view.
@@ -317,9 +292,7 @@ impl ProcessesTab {
     /// between it and the row that heads its group. Without that the row is not in
     /// the display list at all, and the jump would look like nothing happened.
     pub fn reveal(&mut self, snap: &Snapshot, key: ProcKey) {
-        self.selected = Some(key);
-        self.pending_reveal = true;
-        self.dirty = true;
+        self.list.reveal(key);
 
         let Some(mut i) = snap.find_by_key(key) else {
             return;
@@ -349,7 +322,7 @@ impl ProcessesTab {
     /// and hide the busiest background process below a fold. So: grouped by name,
     /// flat by anything else.
     pub fn grouped(&self) -> bool {
-        self.table.sort_by == C_NAME
+        self.list.table.sort_by == C_NAME
     }
 
     /// Processes that would be terminated by "End process tree" on the
@@ -390,9 +363,8 @@ impl ProcessesTab {
         self.matched.clear();
         self.matched.resize(n, true);
         if !filter.is_empty() {
-            let needle = filter.to_ascii_lowercase();
             for (i, p) in snap.procs.iter().enumerate() {
-                self.matched[i] = row_matches(p, meta, &needle);
+                self.matched[i] = row_matches(p, meta, filter);
             }
             // Propagate matches upward. `procs` is not topologically ordered, so
             // walk each match's ancestor chain instead of relying on order.
@@ -408,8 +380,8 @@ impl ProcessesTab {
             }
         }
 
-        let sort_by = self.table.sort_by;
-        let desc = self.table.sort_desc;
+        let sort_by = self.list.table.sort_by;
+        let desc = self.list.table.sort_desc;
 
         // The RAM no process row owns. Left out while filtering: the readings
         // exist to reconcile the rows with the header total, and a filtered list
@@ -474,7 +446,7 @@ impl ProcessesTab {
         // Record the order so a later freeze has something to hold on to.
         // Skipped while frozen, or the frozen order would drift as new
         // processes are appended.
-        if !self.frozen {
+        if !self.list.frozen {
             self.rank.clear();
             self.rank.reserve(self.rows.len());
             self.sys_rank = [u32::MAX; SysRow::COUNT];
@@ -489,22 +461,6 @@ impl ProcessesTab {
             }
         }
 
-        // Re-locate the selection in the new list.
-        self.selected_row = self.selected.and_then(|key| {
-            self.rows.iter().position(|r| match r.kind {
-                RowKind::Proc(i) => snap.procs[i as usize].key() == key,
-                _ => false,
-            })
-        });
-
-        // A reveal selects the row it is revealing, so the search above has already
-        // found it -- there is nothing here to look up, only the scroll to ask for.
-        // Taken whether or not it resolved: a process that exited between the click
-        // and this rebuild is not going to turn up in a later one either, and
-        // `selected_row` is then `None`, which asks for no scroll.
-        if std::mem::take(&mut self.pending_reveal) {
-            self.table.scroll_to_row = self.selected_row;
-        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -540,7 +496,7 @@ impl ProcessesTab {
         // Taken out so the frozen rank can be read while `sort_buf` is borrowed
         // mutably; both are fields of `self`.
         let rank = std::mem::take(&mut self.rank);
-        let frozen = self.frozen.then_some(&rank);
+        let frozen = self.list.frozen.then_some(&rank);
         sort_indices(&mut self.sort_buf, snap, meta, sort_by, desc, frozen);
 
         // The system readings join the top level as entries in their own right,
@@ -701,22 +657,19 @@ impl ProcessesTab {
     ) {
         // Holding Ctrl pins the row order so a moving row can actually be
         // clicked. Values keep updating; only the ordering is held.
-        let freeze = ui.input(|i| i.modifiers.ctrl);
-        if freeze != self.frozen {
-            self.frozen = freeze;
-            self.dirty = true;
-        }
+        self.list.freeze_with_ctrl(ui);
 
-        if self.dirty
-            || self.built_generation != snap.generation
-            || self.built_filter != filter
-            || self.built_grouped != self.grouped()
-        {
+        // Grouping follows the sort, so a sort change is a shape change: the one
+        // staleness reason `ListTab` cannot know about.
+        if self.list.stale(snap.generation, filter) || self.built_grouped != self.grouped() {
             self.rebuild(snap, meta, filter);
-            self.built_generation = snap.generation;
-            self.built_filter = filter.to_owned();
             self.built_grouped = self.grouped();
-            self.dirty = false;
+            let Self { list, rows, .. } = self;
+            list.built(snap.generation, filter, rows.len(), |r| match rows[r].kind {
+                RowKind::Proc(i) => Some(snap.procs[i as usize].key()),
+                // A section header or a system reading: nothing that can be selected.
+                _ => None,
+            });
         }
 
         // What the whole machine is doing, under the column that apportions it --
@@ -727,7 +680,6 @@ impl ProcessesTab {
         // Disk is the busiest volume rather than a sum, the same choice the
         // Performance tab's disk cards make: two disks at 50% is not one disk at
         // 100%, and a total over 100% would read as a bug.
-        let id = Id::new("processes");
         let mut cpu = String::new();
         fmt::percent_sign(&mut cpu, snap.cpu.total);
         let mut mem = String::new();
@@ -737,91 +689,70 @@ impl ProcessesTab {
             &mut disk,
             snap.disks.iter().map(|d| d.active_pct).fold(0.0, f32::max),
         );
-        if self.table.header_with(
-            ui,
-            t,
-            id,
-            &[(C_CPU, &cpu), (C_MEM, &mem), (C_DISK, &disk)],
-        ) {
-            self.dirty = true;
-        }
+        self.list
+            .header_with(ui, t, &[(C_CPU, &cpu), (C_MEM, &mem), (C_DISK, &disk)]);
 
-        let slots = Slots::build(&self.table);
+        let slots = Slots::build(&self.list.table);
         // Resolved once per frame rather than per painted row: it sums the private
         // working set of every process, which is not something to repeat forty
         // times while scrolling.
         let sys = SysMem::of(snap);
         let ctx = ui.ctx().clone();
-        let rows = std::mem::take(&mut self.rows);
         let mut toggle: Option<usize> = None;
-        let mut buf = std::mem::take(&mut self.scratch);
         // Recorded while painting the hovered row. Deriving the expander's hit
         // area afterwards is not possible: the row's cell rectangles live in
         // screen space inside the scroll area, which this scope cannot see.
         let mut expander_hit: Option<egui::Rect> = None;
 
-        let out = self.table.body(
-            ui,
-            t,
-            id,
-            rows.len(),
-            self.selected_row,
-            |rp| {
-                let row = rows[rp.row];
-                let hit = match row.kind {
-                    RowKind::Group(cat) => paint_group_row(
-                        rp,
-                        t,
-                        cat,
-                        row.expanded,
-                        snap,
-                        &self.matched,
-                        &slots,
-                        &mut buf,
-                    ),
-                    RowKind::Proc(idx) => {
-                        let p = &snap.procs[idx as usize];
-                        paint_proc_row(rp, t, p, &row, meta, icons, &ctx, &slots, &mut buf)
-                    }
-                    RowKind::SysGroup => {
-                        paint_sys_group_row(rp, t, &sys, row.expanded, &slots, &mut buf)
-                    }
-                    RowKind::Sys(kind) => {
-                        paint_sys_row(rp, t, kind, &sys, &row, &slots, &mut buf);
-                        None
-                    }
-                };
+        // Destructured rather than moved out of `self`: the row closure is handed the
+        // formatting buffer, so the only things left for it to borrow are this tab's
+        // own display list and match flags. See `ui::list`.
+        let out = {
+            let Self {
+                list,
+                rows,
+                matched,
+                ..
+            } = self;
+            list.body(ui, t, rows.len(), |rp, _vis, buf| {
+            let row = rows[rp.row];
+            let hit = match row.kind {
+                RowKind::Group(cat) => {
+                    paint_group_row(rp, t, cat, row.expanded, snap, matched, &slots, buf)
+                }
+                RowKind::Proc(idx) => {
+                    let p = &snap.procs[idx as usize];
+                    paint_proc_row(rp, t, p, &row, meta, icons, &ctx, &slots, buf)
+                }
+                RowKind::SysGroup => paint_sys_group_row(rp, t, &sys, row.expanded, &slots, buf),
+                RowKind::Sys(kind) => {
+                    paint_sys_row(rp, t, kind, &sys, &row, &slots, buf);
+                    None
+                }
+            };
                 if rp.hovered {
                     expander_hit = hit;
                 }
-            },
-        );
-
-        self.scratch = buf;
+            })
+        };
 
         // --- interaction --------------------------------------------------
         // Only a process can be the selection, which is what disables End task,
         // the context menu and the inspector on every other kind of row: they all
-        // read `selected`, and clicking a section clears it.
-        if let Some(r) = out.clicked_row.or(out.context_row) {
-            if let Some(row) = rows.get(r) {
-                match row.kind {
-                    RowKind::Proc(idx) => {
-                        self.selected = Some(snap.procs[idx as usize].key());
-                        self.selected_row = Some(r);
-                    }
-                    _ => {
-                        self.selected = None;
-                        self.selected_row = None;
-                    }
-                }
-            }
+        // read `selected`, and `key_of` answering `None` for a section is what
+        // clears it.
+        {
+            let Self { list, rows, .. } = self;
+            list.select_from_clicks(&out, |r| match rows.get(r).map(|x| x.kind) {
+                Some(RowKind::Proc(idx)) => Some(snap.procs[idx as usize].key()),
+                _ => None,
+            });
         }
 
         // A single click toggles when it lands on the disclosure triangle;
         // clicking a group header anywhere toggles it, as Task Manager does.
         if let Some(r) = out.clicked_row {
-            if let Some(row) = rows.get(r) {
+            if let Some(row) = self.rows.get(r) {
                 let on_expander = expander_hit
                     .zip(ctx.pointer_latest_pos())
                     // Widen the triangle's 16px box a little: it is a small
@@ -834,7 +765,7 @@ impl ProcessesTab {
         }
         // Double-clicking anywhere on a parent row toggles it too.
         if let Some(r) = out.double_clicked_row {
-            if rows.get(r).is_some_and(|row| row.has_children) {
+            if self.rows.get(r).is_some_and(|row| row.has_children) {
                 toggle = Some(r);
             }
         }
@@ -843,8 +774,9 @@ impl ProcessesTab {
         // Skipped while a text field holds focus, so typing in the filter box
         // does not also drive the selection.
         let typing = ctx.memory(|m| m.focused().is_some());
-        if !typing && !rows.is_empty() {
-            let cur = self.selected_row;
+        if !typing && !self.rows.is_empty() {
+            let Self { list, rows, .. } = self;
+            let cur = list.selected_row;
             let mut nav = None;
             ui.input(|i| {
                 for (key, action) in [
@@ -897,18 +829,22 @@ impl ProcessesTab {
                 };
 
                 if let Some(t) = target.take() {
-                    self.selected_row = Some(t);
-                    self.selected = match rows[t].kind {
+                    list.select_and_scroll(t, |r| match rows[r].kind {
                         RowKind::Proc(i) => Some(snap.procs[i as usize].key()),
                         _ => None,
-                    };
-                    self.table.scroll_to_row = Some(t);
+                    });
+                    // A section header cannot be *selected*, but the keyboard still
+                    // has to be able to land on it -- otherwise Up out of the first
+                    // process in a group would have nowhere to go and the walk would
+                    // stop dead. So the row is set even where the key was not.
+                    list.selected_row = Some(t);
+                    list.table.scroll_to_row = Some(t);
                 }
             }
         }
 
         if let Some(r) = toggle {
-            match rows[r].kind {
+            match self.rows[r].kind {
                 RowKind::Group(cat) => {
                     if !self.collapsed_groups.remove(&cat) {
                         self.collapsed_groups.insert(cat);
@@ -924,12 +860,12 @@ impl ProcessesTab {
                 // A leaf: nothing under it to fold away.
                 RowKind::Sys(_) => {}
             }
-            self.dirty = true;
+            self.list.mark_dirty();
         }
 
         // --- context menu -------------------------------------------------
         if let Some(r) = out.context_row {
-            if let Some(RowKind::Proc(idx)) = rows.get(r).map(|x| x.kind) {
+            if let Some(RowKind::Proc(idx)) = self.rows.get(r).map(|x| x.kind) {
                 let p = &snap.procs[idx as usize];
                 let key = p.key();
                 let name = p.name.clone();
@@ -949,7 +885,7 @@ impl ProcessesTab {
             }
         } else {
             ContextMenu::new(&out.response).show(&ctx, |ui| {
-                if let Some(key) = self.selected {
+                if let Some(key) = self.list.selected {
                     if let Some(i) = snap.find_by_key(key) {
                         let p = &snap.procs[i];
                         let path = meta.get(key).and_then(|m| m.path.clone());
@@ -968,8 +904,6 @@ impl ProcessesTab {
                 ui.add(no_process());
             });
         }
-
-        self.rows = rows;
     }
 }
 
@@ -1341,7 +1275,7 @@ fn app_first<'a>(title: &'a str, desc: Option<&str>, exe: &str, buf: &'a mut Str
 
 /// Does this title segment name the program it belongs to?
 fn names_app(segment: &str, desc: Option<&str>, exe: &str) -> bool {
-    if desc.is_some_and(|d| !d.is_empty() && contains_ci(segment, d)) {
+    if desc.is_some_and(|d| !d.is_empty() && fmt::contains_ci(segment, d)) {
         return true;
     }
     // Fall back to the image name, which is available on the first frame.
@@ -1352,33 +1286,23 @@ fn names_app(segment: &str, desc: Option<&str>, exe: &str) -> bool {
     if stem.is_empty() {
         return false;
     }
-    if contains_ci(segment, stem) {
+    if fmt::contains_ci(segment, stem) {
         return true;
     }
     // "Microsoft Teams" against `ms-teams.exe`: neither contains the other, but
     // a distinctive word does. Short words would match far too much.
     segment
         .split(|c: char| !c.is_alphanumeric())
-        .any(|w| w.len() >= 4 && contains_ci(stem, w))
-}
-
-/// ASCII-case-insensitive substring test, without allocating a lowercase copy.
-/// Non-ASCII bytes compare exactly, which is what we want for names.
-fn contains_ci(haystack: &str, needle: &str) -> bool {
-    let (h, n) = (haystack.as_bytes(), needle.as_bytes());
-    if n.is_empty() || n.len() > h.len() {
-        return n.is_empty();
-    }
-    h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
+        .any(|w| w.len() >= 4 && fmt::contains_ci(stem, w))
 }
 
 /// Does this process match the search box?
-fn row_matches(p: &Proc, meta: &MetaStore, needle_lower: &str) -> bool {
-    if p.name.to_ascii_lowercase().contains(needle_lower) {
+fn row_matches(p: &Proc, meta: &MetaStore, needle: &str) -> bool {
+    if fmt::contains_ci(&p.name, needle) {
         return true;
     }
     // Bare numbers are almost always a PID lookup.
-    if let Ok(pid) = needle_lower.parse::<u32>() {
+    if let Ok(pid) = needle.parse::<u32>() {
         if p.pid == pid {
             return true;
         }
@@ -1386,16 +1310,13 @@ fn row_matches(p: &Proc, meta: &MetaStore, needle_lower: &str) -> bool {
     if p
         .window_title
         .as_ref()
-        .is_some_and(|w| w.to_ascii_lowercase().contains(needle_lower))
+        .is_some_and(|w| fmt::contains_ci(w, needle))
     {
         return true;
     }
     if let Some(m) = meta.get(p.key()) {
         for field in [&m.description, &m.company, &m.path, &m.user] {
-            if field
-                .as_ref()
-                .is_some_and(|s| s.to_ascii_lowercase().contains(needle_lower))
-            {
+            if field.as_ref().is_some_and(|s| fmt::contains_ci(s, needle)) {
                 return true;
             }
         }
@@ -1545,8 +1466,8 @@ mod tests {
         let snap = machine();
         let meta = MetaStore::new();
         let mut tab = ProcessesTab::new();
-        tab.table.sort_by = sort_by;
-        tab.table.sort_desc = sort_by != C_NAME;
+        tab.list.table.sort_by = sort_by;
+        tab.list.table.sort_desc = sort_by != C_NAME;
         tab.rebuild(&snap, &meta, "");
         tab.rows
             .iter()
@@ -1582,7 +1503,7 @@ mod tests {
             let snap = machine();
             let meta = MetaStore::new();
             let mut tab = ProcessesTab::new();
-            tab.table.sort_by = sort_by;
+            tab.list.table.sort_by = sort_by;
             // Expand everything expandable, so nothing is missing merely because
             // it is folded away.
             for p in &snap.procs {
@@ -1704,8 +1625,8 @@ mod tests {
         let sys = SysMem::of(&snap);
         let meta = MetaStore::new();
         let mut tab = ProcessesTab::new();
-        tab.table.sort_by = C_MEM;
-        tab.table.sort_desc = true;
+        tab.list.table.sort_by = C_MEM;
+        tab.list.table.sort_desc = true;
         tab.rebuild(&snap, &meta, "");
 
         // No section header for anything, readings included.
@@ -1748,8 +1669,8 @@ mod tests {
         let mut snap = machine_with_memory();
         let meta = MetaStore::new();
         let mut tab = ProcessesTab::new();
-        tab.table.sort_by = C_MEM;
-        tab.table.sort_desc = true;
+        tab.list.table.sort_by = C_MEM;
+        tab.list.table.sort_desc = true;
         tab.rebuild(&snap, &meta, "");
         let before: Vec<usize> = tab
             .rows
@@ -1761,7 +1682,7 @@ mod tests {
 
         // Freeze, then hand it a sample that would reorder everything: the two
         // processes now dwarf every reading.
-        tab.frozen = true;
+        tab.list.frozen = true;
         snap.procs[0].sub_private_ws = 9 * GB;
         snap.procs[1].sub_private_ws = 8 * GB;
         tab.rebuild(&snap, &meta, "");

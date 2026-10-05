@@ -6,6 +6,7 @@ pub mod fmt;
 pub mod graph;
 pub mod icons;
 pub mod inspector;
+pub mod list;
 
 pub mod performance;
 pub mod processes;

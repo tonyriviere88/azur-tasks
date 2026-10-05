@@ -29,6 +29,7 @@
 //! real hardware and reports readings; which of the individual sensors are *right*
 //! is still something only a Radeon owner can say.
 
+use super::gpu_backend::GpuBackend;
 use super::snapshot::{vendor, GpuSensors};
 use super::util::{dll_symbol as symbol, load_dll};
 use std::ffi::c_void;
@@ -283,26 +284,6 @@ impl Adl {
         out
     }
 
-    pub fn device_count(&self) -> u32 {
-        self.adapters.len() as u32
-    }
-
-    pub fn read(&self, i: u32) -> Option<GpuSensors> {
-        let (adapter, name) = self.adapters.get(i as usize)?.clone();
-        let mut out = GpuSensors {
-            vendor: vendor::AMD,
-            ordinal: i,
-            source: "ADL",
-            name,
-            ..Default::default()
-        };
-
-        if !self.read_pmlog(adapter, &mut out) {
-            self.read_overdrive_temperature(adapter, &mut out);
-        }
-        Some(out)
-    }
-
     /// The modern path. Returns false when this adapter has no PMLog interface.
     fn read_pmlog(&self, adapter: i32, out: &mut GpuSensors) -> bool {
         let Some(pm_log) = self.pm_log else {
@@ -424,6 +405,28 @@ impl Adl {
         if let Some(m) = millidegrees {
             out.set_temp(m as f32 / 1000.0);
         }
+    }
+}
+
+impl GpuBackend for Adl {
+    fn device_count(&self) -> u32 {
+        self.adapters.len() as u32
+    }
+
+    fn read(&mut self, i: u32) -> Option<GpuSensors> {
+        let (adapter, name) = self.adapters.get(i as usize)?.clone();
+        let mut out = GpuSensors {
+            vendor: vendor::AMD,
+            ordinal: i,
+            source: "ADL",
+            name,
+            ..Default::default()
+        };
+
+        if !self.read_pmlog(adapter, &mut out) {
+            self.read_overdrive_temperature(adapter, &mut out);
+        }
+        Some(out)
     }
 }
 

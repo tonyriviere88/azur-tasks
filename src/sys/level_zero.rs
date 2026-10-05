@@ -17,6 +17,7 @@
 //! future driver does, the call fails and the reading shows as absent rather than
 //! as a wrong number.
 
+use super::gpu_backend::GpuBackend;
 use super::snapshot::{vendor, GpuSensors};
 use super::util::{dll_symbol as symbol, load_dll};
 use std::ffi::c_void;
@@ -209,32 +210,6 @@ impl LevelZero {
         })
     }
 
-    pub fn device_count(&self) -> u32 {
-        self.devices.len() as u32
-    }
-
-    pub fn read(&mut self, i: u32) -> Option<GpuSensors> {
-        let device = *self.devices.get(i as usize)?;
-        let mut out = GpuSensors {
-            vendor: vendor::INTEL,
-            ordinal: i,
-            source: "Level Zero",
-            // Left to the caller: sysman's own device name lives in a large
-            // versioned structure, and DXGI already knows what this adapter is
-            // called.
-            name: Arc::from(""),
-            ..Default::default()
-        };
-
-        self.read_temperature(device, &mut out);
-        self.read_fan(device, &mut out);
-        self.read_frequency(device, &mut out);
-        self.read_memory(device, &mut out);
-        self.read_power(device, i as usize, &mut out);
-
-        Some(out)
-    }
-
     /// The GPU core sensor if the device has one, else the device-wide one.
     fn read_temperature(&self, device: Handle, out: &mut GpuSensors) {
         let (Some(enum_fn), Some(props_fn), Some(state_fn)) =
@@ -370,6 +345,34 @@ impl LevelZero {
         if let Some(slot) = self.prev_energy.get_mut(index) {
             *slot = Some(now);
         }
+    }
+}
+
+impl GpuBackend for LevelZero {
+    fn device_count(&self) -> u32 {
+        self.devices.len() as u32
+    }
+
+    fn read(&mut self, i: u32) -> Option<GpuSensors> {
+        let device = *self.devices.get(i as usize)?;
+        let mut out = GpuSensors {
+            vendor: vendor::INTEL,
+            ordinal: i,
+            source: "Level Zero",
+            // Left to the caller: sysman's own device name lives in a large
+            // versioned structure, and DXGI already knows what this adapter is
+            // called.
+            name: Arc::from(""),
+            ..Default::default()
+        };
+
+        self.read_temperature(device, &mut out);
+        self.read_fan(device, &mut out);
+        self.read_frequency(device, &mut out);
+        self.read_memory(device, &mut out);
+        self.read_power(device, i as usize, &mut out);
+
+        Some(out)
     }
 }
 

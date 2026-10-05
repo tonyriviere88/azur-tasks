@@ -215,3 +215,51 @@ pub fn elide_to_width(ui: &egui::Ui, s: &str, font: &egui::FontId, max_w: f32) -
     out.push('…');
     out
 }
+
+/// ASCII-case-insensitive substring test, without allocating a lowercase copy.
+///
+/// What every filter box in this window searches with. The obvious spelling —
+/// `haystack.to_ascii_lowercase().contains(needle)` — allocates a `String` per
+/// field per row, so filtering a 600-row table over five searchable fields is
+/// three thousand allocations *per keystroke*. This reads the bytes where they are.
+///
+/// Non-ASCII bytes compare exactly, which is what is wanted for a process name: the
+/// alternative is Unicode case folding, and a task manager's search box is matching
+/// file names and service keys, not prose.
+pub fn contains_ci(haystack: &str, needle: &str) -> bool {
+    let (h, n) = (haystack.as_bytes(), needle.as_bytes());
+    if n.is_empty() || n.len() > h.len() {
+        return n.is_empty();
+    }
+    h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::contains_ci;
+
+    /// The search primitive four filter boxes share, so its edges are worth pinning:
+    /// an empty needle matches everything (an empty box filters nothing), and a
+    /// needle longer than the haystack cannot match however it is cased.
+    #[test]
+    fn matches_a_substring_whatever_its_case() {
+        assert!(contains_ci("chrome.exe", "CHROME"));
+        assert!(contains_ci("CHROME.EXE", "chrome"));
+        assert!(contains_ci("MsMpEng.exe", "mpeng"));
+        assert!(!contains_ci("chrome.exe", "firefox"));
+
+        assert!(contains_ci("anything", ""));
+        assert!(contains_ci("", ""));
+        assert!(!contains_ci("", "x"));
+        assert!(!contains_ci("ab", "abc"));
+    }
+
+    /// Non-ASCII compares exactly rather than being case-folded -- the documented
+    /// contract, and what keeps a service key matching byte for byte.
+    #[test]
+    fn leaves_non_ascii_alone() {
+        assert!(contains_ci("Explorateur Windows", "explorateur"));
+        assert!(contains_ci("café.exe", "café"));
+        assert!(!contains_ci("café.exe", "CAFÉ"));
+    }
+}

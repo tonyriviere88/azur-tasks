@@ -1,6 +1,7 @@
 //! The Services tab.
 
 use super::fmt;
+use super::list::{ListTab, NO_GENERATION};
 use super::table::{Align, Column, Table};
 use super::theme::Theme;
 use azur_egui_theme::components::{
@@ -8,7 +9,7 @@ use azur_egui_theme::components::{
 };
 use crate::sys::services::{self, Service, ServiceState};
 use crate::sys::snapshot::Snapshot;
-use egui::{Id, Ui};
+use egui::Ui;
 use std::time::{Duration, Instant};
 
 const C_NAME: u16 = 0;
@@ -18,16 +19,14 @@ const C_STATE: u16 = 3;
 const C_GROUP: u16 = 4;
 
 pub struct ServicesTab {
-    pub table: Table,
+    /// Keyed by row index: a service is re-enumerated wholesale every couple of
+    /// seconds, so position is what a selection can honestly be pinned to here.
+    pub list: ListTab<usize>,
     services: Vec<Service>,
     order: Vec<u32>,
-    selected: Option<usize>,
     /// Enumerating services walks the registry for every entry, so it is polled
     /// on its own slower cadence rather than with the process sampler.
     last_refresh: Option<Instant>,
-    built_filter: String,
-    dirty: bool,
-    scratch: String,
     /// The folder-opening target for the row the context menu is on, resolved when
     /// the menu opens: a service's image path is a registry read and a walk down a
     /// command line, neither of which belongs in every frame.
@@ -43,16 +42,11 @@ impl ServicesTab {
             Column::new(C_STATE, "Status", 96.0, Align::Left),
             Column::new(C_GROUP, "Group", 160.0, Align::Left),
         ];
-        let table = Table::new(cols, C_NAME, false);
         Self {
-            table,
+            list: ListTab::new("services", Table::new(cols, C_NAME, false)),
             services: Vec::new(),
             order: Vec::new(),
-            selected: None,
             last_refresh: None,
-            built_filter: String::new(),
-            dirty: true,
-            scratch: String::new(),
             menu_path: None,
         }
     }
@@ -66,18 +60,18 @@ impl ServicesTab {
         if stale {
             self.services = services::enumerate();
             self.last_refresh = Some(Instant::now());
-            self.dirty = true;
+            self.list.mark_dirty();
         }
     }
 
     fn rebuild(&mut self, filter: &str) {
         self.order.clear();
-        let needle = filter.to_ascii_lowercase();
+        let pid = filter.parse::<u32>().ok();
         for (i, s) in self.services.iter().enumerate() {
-            if !needle.is_empty() {
-                let hit = s.name.to_ascii_lowercase().contains(&needle)
-                    || s.display_name.to_ascii_lowercase().contains(&needle)
-                    || s.pid.to_string() == needle;
+            if !filter.is_empty() {
+                let hit = super::fmt::contains_ci(&s.name, filter)
+                    || super::fmt::contains_ci(&s.display_name, filter)
+                    || pid == Some(s.pid);
                 if !hit {
                     continue;
                 }
@@ -87,7 +81,7 @@ impl ServicesTab {
 
         let svc = &self.services;
         let v = &mut self.order;
-        match self.table.sort_by {
+        match self.list.table.sort_by {
             C_PID => v.sort_unstable_by_key(|&i| {
                 // Stopped services report PID 0; sort those last either way.
                 let p = svc[i as usize].pid;
@@ -114,7 +108,7 @@ impl ServicesTab {
             }),
             _ => v.sort_unstable_by_key(|&i| svc[i as usize].name.to_ascii_lowercase()),
         }
-        if self.table.sort_desc {
+        if self.list.table.sort_desc {
             v.reverse();
         }
     }
@@ -128,33 +122,23 @@ impl ServicesTab {
         action: &mut Option<super::Action>,
     ) {
         self.maybe_refresh();
-        if self.dirty || self.built_filter != filter {
+        if self.list.stale(NO_GENERATION, filter) {
             self.rebuild(filter);
-            self.built_filter = filter.to_owned();
-            self.dirty = false;
+            self.list
+                .built(NO_GENERATION, filter, self.order.len(), Some);
         }
+        self.list.header(ui, t);
 
-        let id = Id::new("services");
-        if self.table.header(ui, t, id) {
-            self.dirty = true;
-        }
-
-        let order = std::mem::take(&mut self.order);
-        let mut buf = std::mem::take(&mut self.scratch);
-        // Hoisted so the row callback does not need `self.table`, which
-        // `Table::body` holds mutably.
-        let vis: Vec<u16> = self
-            .table
-            .cols
-            .iter()
-            .filter(|c| c.visible)
-            .map(|c| c.id)
-            .collect();
-        let services = std::mem::take(&mut self.services);
-
-        let out = self
-            .table
-            .body(ui, t, id, order.len(), self.selected, |rp| {
+        // Destructured rather than moved out of `self`: the row closure is handed the
+        // column ids and the buffer, so the only thing left for it to borrow is this
+        // tab's own data. See `ui::list`.
+        let Self {
+            list,
+            services,
+            order,
+            ..
+        } = self;
+        let out = list.body(ui, t, order.len(), |rp, vis, buf| {
                 let s = &services[order[rp.row] as usize];
                 for (slot, &cid) in vis.iter().enumerate() {
                     match cid {
@@ -163,8 +147,8 @@ impl ServicesTab {
                             if s.pid == 0 {
                                 rp.text(slot, "—", t.text.tertiary, Align::Right);
                             } else {
-                                fmt::integer(&mut buf, s.pid as u64);
-                                rp.text_font(slot, &buf, t.text.secondary, Align::Right, &t.fonts.mono);
+                                fmt::integer(buf, s.pid as u64);
+                                rp.text_font(slot, buf, t.text.secondary, Align::Right, &t.fonts.mono);
                             }
                         }
                         C_DESC => rp.text(slot, &s.display_name, t.text.secondary, Align::Left),
@@ -189,23 +173,14 @@ impl ServicesTab {
                 }
             });
 
-        self.scratch = buf;
-        self.services = services;
-
-        if let Some(r) = out.clicked_row.or(out.context_row) {
-            self.selected = Some(r);
-        }
-        if let Some(r) = super::table::list_nav(ui, self.selected, order.len()) {
-            self.selected = Some(r);
-            self.table.scroll_to_row = Some(r);
-        }
+        self.list.settle(ui, &out, self.order.len(), Some);
 
         // A running service maps onto a process, so offer the same jump.
         let hosting_pid = out
             .context_row
-            .or(self.selected)
-            .and_then(|r| order.get(r))
-            .map(|&i| self.services[i as usize].pid)
+            .or(self.list.selected_row)
+            .and_then(|r| self.service_at(r))
+            .map(|s| s.pid)
             .filter(|&p| p != 0);
 
         // Cleared as well as set: right-clicking below the last row opens the menu
@@ -213,8 +188,8 @@ impl ServicesTab {
         if out.response.secondary_clicked() {
             self.menu_path = out
                 .context_row
-                .and_then(|r| order.get(r))
-                .and_then(|&i| services::image_path(&self.services[i as usize].name))
+                .and_then(|r| self.service_at(r))
+                .and_then(|s| services::image_path(&s.name))
                 .and_then(|cmd| crate::sys::actions::executable_of(&cmd));
         }
         let menu_path = self.menu_path.clone();
@@ -259,13 +234,18 @@ impl ServicesTab {
             );
         });
 
-        self.order = order;
     }
 
-    /// Drop the selection, for Escape. One field here: this list selects by row, and
-    /// the row is what the "go to the hosting process" jump reads.
+    /// The service a visible row stands for.
+    fn service_at(&self, row: usize) -> Option<&Service> {
+        self.order
+            .get(row)
+            .and_then(|i| self.services.get(*i as usize))
+    }
+
+    /// Drop the selection, for Escape.
     pub fn clear_selection(&mut self) {
-        self.selected = None;
+        self.list.clear_selection();
     }
 
     pub fn count(&self) -> (usize, usize) {

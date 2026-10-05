@@ -18,11 +18,9 @@
 //! NVIDIA driver reports no temperatures, and the tab says so rather than drawing
 //! a gauge at zero -- a sensor reading of "0 °C" is a lie, "—" is not.
 
-use super::adl::Adl;
-use super::level_zero::LevelZero;
-use super::nvml::Nvml;
+use super::gpu_backend::{GpuBackend, BACKENDS};
 use super::pdh::{Counter, Query};
-use super::snapshot::{vendor, Sensors, ThermalZone};
+use super::snapshot::{Sensors, ThermalZone};
 use super::util::load_dll;
 use std::sync::Arc;
 
@@ -42,9 +40,10 @@ pub struct SensorProbe {
     pdh: Option<Query>,
     thermal: Option<Counter>,
     energy: Option<Counter>,
-    nvml: Option<Nvml>,
-    level_zero: Option<LevelZero>,
-    adl: Option<Adl>,
+    /// Whichever vendor libraries this machine actually has, in [`BACKENDS`] order
+    /// — which is the order their readings are appended in, and so the order
+    /// `Sensors::gpus` comes out in every tick.
+    gpus: Vec<Box<dyn GpuBackend>>,
     items: Vec<(String, f64)>,
     /// Settled at start-up, since that is when the libraries are bound.
     notes: Vec<(u32, Arc<str>)>,
@@ -64,42 +63,24 @@ impl SensorProbe {
             None => (None, None),
         };
 
-        // Loaded once, at start-up: a driver does not appear while the app is
-        // running, and a failed `LoadLibrary` per second would be a waste.
-        let nvml = Nvml::load();
-        let level_zero = LevelZero::load();
-        let adl = Adl::load();
-
+        // Bound once, at start-up: a driver does not appear while the app is
+        // running, and a failed `LoadLibrary` per second would be a waste. This
+        // walks the registry rather than naming the vendors, so a fourth of them is
+        // a row in `gpu_backend.rs` and nothing here.
+        let mut gpus = Vec::new();
         let mut notes = Vec::new();
-        silent(
-            &mut notes,
-            vendor::NVIDIA,
-            "nvml.dll",
-            "NVML",
-            nvml.is_some(),
-        );
-        silent(
-            &mut notes,
-            vendor::INTEL,
-            "ze_loader.dll",
-            "Level Zero",
-            level_zero.is_some(),
-        );
-        silent(
-            &mut notes,
-            vendor::AMD,
-            "atiadlxx.dll",
-            "ADL",
-            adl.is_some(),
-        );
+        for b in &BACKENDS {
+            match (b.load)() {
+                Some(backend) => gpus.push(backend),
+                None => silent(&mut notes, b.vendor, b.dll, b.api),
+            }
+        }
 
         Self {
             pdh,
             thermal,
             energy,
-            nvml,
-            level_zero,
-            adl,
+            gpus,
             items: Vec::new(),
             notes,
         }
@@ -134,19 +115,9 @@ impl SensorProbe {
         }
 
         out.gpus.clear();
-        if let Some(nvml) = self.nvml.as_ref() {
-            for i in 0..nvml.device_count() {
-                out.gpus.extend(nvml.read(i));
-            }
-        }
-        if let Some(lz) = self.level_zero.as_mut() {
-            for i in 0..lz.device_count() {
-                out.gpus.extend(lz.read(i));
-            }
-        }
-        if let Some(adl) = self.adl.as_ref() {
-            for i in 0..adl.device_count() {
-                out.gpus.extend(adl.read(i));
+        for backend in &mut self.gpus {
+            for i in 0..backend.device_count() {
+                out.gpus.extend(backend.read(i));
             }
         }
 
@@ -209,15 +180,16 @@ impl SensorProbe {
 
 /// Note a vendor library that is installed on this machine and still said nothing.
 ///
-/// The library being absent is the ordinary case and gets no note -- most machines
-/// have one vendor's card, so two of the three are expected to be missing. Present
-/// and mute is the case worth reporting: it means the interface refused to start,
-/// or started and enumerated no adapter, and a reader staring at a temperature that
-/// is not there has no other way to tell that apart from having no such card.
-fn silent(out: &mut Vec<(u32, Arc<str>)>, vendor: u32, dll: &str, api: &str, answered: bool) {
+/// Called only for a backend that failed to bind. The library being *absent* is the
+/// ordinary case and gets no note -- most machines have one vendor's card, so two of
+/// the three are expected to be missing. Present and mute is the case worth
+/// reporting: it means the interface refused to start, or started and enumerated no
+/// adapter, and a reader staring at a temperature that is not there has no other way
+/// to tell that apart from having no such card.
+fn silent(out: &mut Vec<(u32, Arc<str>)>, vendor: u32, dll: &str, api: &str) {
     // `load_dll` on something already loaded only takes a reference to it, and
     // these stay loaded for the life of the process either way.
-    if answered || load_dll(dll).is_none() {
+    if load_dll(dll).is_none() {
         return;
     }
     out.push((
@@ -304,6 +276,7 @@ fn zone_label(instance: &str) -> Arc<str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sys::snapshot::vendor;
 
     #[test]
     fn names_the_zones_it_knows_and_passes_the_rest_through() {
@@ -320,26 +293,21 @@ mod tests {
     ///
     /// `kernel32.dll` stands in for an installed vendor library, since it is the one
     /// DLL guaranteed to be loadable on any Windows: what is being tested is which
-    /// of the three cases produces a line, not who answered.
+    /// case produces a line, not who answered.
+    ///
+    /// There used to be a third case here -- installed *and* answered -- and it is
+    /// gone because it can no longer be reached: `silent` is called from the one arm
+    /// of the registry loop that had no backend to show for the library, so "it
+    /// answered" is not a state this function can be asked about.
     #[test]
     fn reports_a_library_that_is_installed_and_mute() {
         let mut notes = Vec::new();
-        // Installed, and it answered: nothing to say.
-        silent(&mut notes, vendor::AMD, "kernel32.dll", "ADL", true);
-        assert!(notes.is_empty());
-
         // Not installed at all: the ordinary case for two vendors out of three.
-        silent(
-            &mut notes,
-            vendor::AMD,
-            "no-such-vendor-lib.dll",
-            "ADL",
-            false,
-        );
+        silent(&mut notes, vendor::AMD, "no-such-vendor-lib.dll", "ADL");
         assert!(notes.is_empty(), "an absent library is not a fault");
 
         // Installed and mute: the case worth a line.
-        silent(&mut notes, vendor::AMD, "kernel32.dll", "ADL", false);
+        silent(&mut notes, vendor::AMD, "kernel32.dll", "ADL");
         assert_eq!(notes.len(), 1);
         assert_eq!(
             notes[0].0,

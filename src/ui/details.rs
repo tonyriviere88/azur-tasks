@@ -1,13 +1,14 @@
 //! The Details tab: one flat row per process, with the full column set.
 
 use super::fmt;
+use super::list::ListTab;
 use super::table::{Align, Column, Table};
 use super::theme::Theme;
 use azur_egui_theme::components::{ContextMenu, Text, TextColor, TextVariant};
 use crate::sys::meta::MetaStore;
 use crate::sys::snapshot::{ProcKey, RunState, Snapshot};
 use crate::sys::util::format_filetime;
-use egui::{Id, Ui};
+use egui::Ui;
 use std::sync::Arc;
 
 const C_NAME: u16 = 0;
@@ -45,26 +46,15 @@ const C_OTHER_BYTES: u16 = 31;
 const C_CYCLES: u16 = 32;
 
 pub struct DetailsTab {
-    pub table: Table,
+    pub list: ListTab<ProcKey>,
     order: Vec<u32>,
-    pub selected: Option<ProcKey>,
-    selected_row: Option<usize>,
-    built_generation: u64,
-    built_filter: String,
-    dirty: bool,
-    scratch: String,
-    /// Set by [`Self::reveal`]; resolved to a row index on the next rebuild,
-    /// because the row order is not known until then.
-    pending_reveal: Option<ProcKey>,
-    /// Ids of the visible columns, in order. Hoisted out of `table` before the
-    /// row callback runs: the callback cannot read `self.table.cols` while
-    /// `Table::body` holds `self.table` mutably.
-    vis: Vec<u16>,
     /// Display position per process from the last unfrozen rebuild, keyed by
     /// identity rather than index so it survives processes appearing/exiting.
+    ///
+    /// Stays here rather than in [`ListTab`]: what a freeze *means* differs per tab
+    /// — this one pins a flat order, the Processes tab pins a tree with section
+    /// headers and non-process rows in it — and only the flag itself is shared.
     rank: rustc_hash::FxHashMap<ProcKey, u32>,
-    /// True while Ctrl is held and the order is pinned.
-    frozen: bool,
 }
 
 impl DetailsTab {
@@ -141,54 +131,41 @@ impl DetailsTab {
             }
         }
         Self {
-            table,
+            list: ListTab::new("details", table),
             order: Vec::new(),
-            selected: None,
-            selected_row: None,
-            built_generation: u64::MAX,
-            built_filter: String::new(),
-            dirty: true,
-            scratch: String::new(),
-            pending_reveal: None,
-            vis: Vec::new(),
             rank: rustc_hash::FxHashMap::default(),
-            frozen: false,
         }
     }
 
     pub fn mark_dirty(&mut self) {
-        self.dirty = true;
+        self.list.mark_dirty();
     }
 
-    /// Drop the selection, for Escape. Both halves, for the reason
-    /// [`super::processes::ProcessesTab::clear_selection`] gives.
+    /// Drop the selection, for Escape.
     pub fn clear_selection(&mut self) {
-        self.selected = None;
-        self.selected_row = None;
+        self.list.clear_selection();
     }
 
     /// Select a process and scroll it into view (used by "Go to details").
     pub fn reveal(&mut self, key: ProcKey) {
-        self.selected = Some(key);
-        self.dirty = true;
-        self.pending_reveal = Some(key);
+        self.list.reveal(key);
     }
 
     fn rebuild(&mut self, snap: &Snapshot, meta: &MetaStore, filter: &str) {
         self.order.clear();
-        let needle = filter.to_ascii_lowercase();
+        // Parsed once rather than `pid.to_string()` per row: a bare number in the
+        // box is a PID lookup, and formatting six hundred of them to compare against
+        // it is six hundred allocations to answer one question.
+        let pid = filter.parse::<u32>().ok();
         for (i, p) in snap.procs.iter().enumerate() {
-            if !needle.is_empty() {
+            if !filter.is_empty() {
                 let m = meta.get(p.key());
-                let hit = p.name.to_ascii_lowercase().contains(&needle)
-                    || p.pid.to_string() == needle
+                let hit = fmt::contains_ci(&p.name, filter)
+                    || pid == Some(p.pid)
                     || m.as_ref().is_some_and(|m| {
                         [&m.description, &m.company, &m.path, &m.user, &m.cmdline]
                             .iter()
-                            .any(|f| {
-                                f.as_ref()
-                                    .is_some_and(|s| s.to_ascii_lowercase().contains(&needle))
-                            })
+                            .any(|f| f.as_ref().is_some_and(|s| fmt::contains_ci(s, filter)))
                     });
                 if !hit {
                     continue;
@@ -197,7 +174,7 @@ impl DetailsTab {
             self.order.push(i as u32);
         }
 
-        if self.frozen {
+        if self.list.frozen {
             // Hold the captured order; anything new lands at the end in PID
             // order so rows already on screen do not move under the cursor.
             let rank = &self.rank;
@@ -210,8 +187,8 @@ impl DetailsTab {
                 &mut self.order,
                 snap,
                 meta,
-                self.table.sort_by,
-                self.table.sort_desc,
+                self.list.table.sort_by,
+                self.list.table.sort_desc,
             );
             self.rank.clear();
             self.rank.reserve(self.order.len());
@@ -220,20 +197,6 @@ impl DetailsTab {
             }
         }
 
-        self.selected_row = self.selected.and_then(|key| {
-            self.order
-                .iter()
-                .position(|&i| snap.procs[i as usize].key() == key)
-        });
-        if let Some(key) = self.pending_reveal.take() {
-            if let Some(row) = self
-                .order
-                .iter()
-                .position(|&i| snap.procs[i as usize].key() == key)
-            {
-                self.table.scroll_to_row = Some(row);
-            }
-        }
     }
 
     pub fn ui(
@@ -246,33 +209,22 @@ impl DetailsTab {
         action: &mut Option<super::Action>,
     ) {
         // Holding Ctrl pins the row order (see the Processes tab).
-        let freeze = ui.input(|i| i.modifiers.ctrl);
-        if freeze != self.frozen {
-            self.frozen = freeze;
-            self.dirty = true;
-        }
+        self.list.freeze_with_ctrl(ui);
 
-        if self.dirty || self.built_generation != snap.generation || self.built_filter != filter {
+        if self.list.stale(snap.generation, filter) {
             self.rebuild(snap, meta, filter);
-            self.built_generation = snap.generation;
-            self.built_filter = filter.to_owned();
-            self.dirty = false;
+            let Self { list, order, .. } = self;
+            list.built(snap.generation, filter, order.len(), |r| {
+                Some(snap.procs[order[r] as usize].key())
+            });
         }
+        self.list.header(ui, t);
 
-        let id = Id::new("details");
-        if self.table.header(ui, t, id) {
-            self.dirty = true;
-        }
-
-        let order = std::mem::take(&mut self.order);
-        let mut buf = std::mem::take(&mut self.scratch);
-        let mut vis = std::mem::take(&mut self.vis);
-        vis.clear();
-        vis.extend(self.table.cols.iter().filter(|c| c.visible).map(|c| c.id));
-
-        let out = self
-            .table
-            .body(ui, t, id, order.len(), self.selected_row, |rp| {
+        // Destructured rather than moved out of `self`: the row closure is handed the
+        // column ids and the buffer, so the only thing left for it to borrow is this
+        // tab's own data. See `ui::list`.
+        let Self { list, order, .. } = self;
+        let out = list.body(ui, t, order.len(), |rp, vis, buf| {
                 let p = &snap.procs[order[rp.row] as usize];
                 let m = meta.get(p.key());
                 // Walk the visible columns in order; `slot` indexes the laid-out
@@ -281,8 +233,8 @@ impl DetailsTab {
                     match cid {
                         C_NAME => rp.text(slot, &p.name, t.text.primary, Align::Left),
                         C_PID => {
-                            fmt::integer(&mut buf, p.pid as u64);
-                            rp.text_font(slot, &buf, t.text.secondary, Align::Right, &t.fonts.mono);
+                            fmt::integer(buf, p.pid as u64);
+                            rp.text_font(slot, buf, t.text.secondary, Align::Right, &t.fonts.mono);
                         }
                         C_STATUS => {
                             let s = match p.state {
@@ -303,8 +255,8 @@ impl DetailsTab {
                         ),
                         C_CPU => {
                             rp.heat(slot, p.cpu / 25.0, t.cpu);
-                            fmt::percent(&mut buf, p.cpu);
-                            rp.text(slot, &buf, t.load_text(p.cpu), Align::Right);
+                            fmt::percent(buf, p.cpu);
+                            rp.text(slot, buf, t.load_text(p.cpu), Align::Right);
                         }
                         C_MEM => {
                             rp.heat(
@@ -312,32 +264,32 @@ impl DetailsTab {
                                 p.private_ws as f32 / (2.0 * 1024.0 * 1024.0 * 1024.0),
                                 t.mem,
                             );
-                            fmt::mem_mb(&mut buf, p.private_ws);
-                            rp.text(slot, &buf, t.text.primary, Align::Right);
+                            fmt::mem_mb(buf, p.private_ws);
+                            rp.text(slot, buf, t.text.primary, Align::Right);
                         }
                         C_PEAK => {
-                            fmt::mem_mb(&mut buf, p.peak_ws);
-                            rp.text(slot, &buf, t.text.secondary, Align::Right);
+                            fmt::mem_mb(buf, p.peak_ws);
+                            rp.text(slot, buf, t.text.secondary, Align::Right);
                         }
                         C_COMMIT => {
-                            fmt::mem_mb(&mut buf, p.commit);
-                            rp.text(slot, &buf, t.text.secondary, Align::Right);
+                            fmt::mem_mb(buf, p.commit);
+                            rp.text(slot, buf, t.text.secondary, Align::Right);
                         }
                         C_WS => {
-                            fmt::mem_mb(&mut buf, p.working_set);
-                            rp.text(slot, &buf, t.text.secondary, Align::Right);
+                            fmt::mem_mb(buf, p.working_set);
+                            rp.text(slot, buf, t.text.secondary, Align::Right);
                         }
                         C_THREADS => {
-                            fmt::integer(&mut buf, p.threads as u64);
-                            rp.text(slot, &buf, t.text.secondary, Align::Right);
+                            fmt::integer(buf, p.threads as u64);
+                            rp.text(slot, buf, t.text.secondary, Align::Right);
                         }
                         C_HANDLES => {
-                            fmt::integer(&mut buf, p.handles as u64);
-                            rp.text(slot, &buf, t.text.secondary, Align::Right);
+                            fmt::integer(buf, p.handles as u64);
+                            rp.text(slot, buf, t.text.secondary, Align::Right);
                         }
                         C_PRIO => {
-                            fmt::integer(&mut buf, p.base_priority as u64);
-                            rp.text(slot, &buf, t.text.secondary, Align::Right);
+                            fmt::integer(buf, p.base_priority as u64);
+                            rp.text(slot, buf, t.text.secondary, Align::Right);
                         }
                         C_ARCH => rp.text(
                             slot,
@@ -346,24 +298,24 @@ impl DetailsTab {
                             Align::Left,
                         ),
                         C_SESSION => {
-                            fmt::integer(&mut buf, p.session as u64);
-                            rp.text(slot, &buf, t.text.tertiary, Align::Right);
+                            fmt::integer(buf, p.session as u64);
+                            rp.text(slot, buf, t.text.tertiary, Align::Right);
                         }
                         C_START => {
                             let s = format_filetime(p.create_time, true);
                             rp.text_font(slot, &s, t.text.tertiary, Align::Left, &t.fonts.mono);
                         }
                         C_READ => {
-                            fmt::bytes(&mut buf, p.io_read_total);
-                            rp.text(slot, &buf, t.text.tertiary, Align::Right);
+                            fmt::bytes(buf, p.io_read_total);
+                            rp.text(slot, buf, t.text.tertiary, Align::Right);
                         }
                         C_WRITE => {
-                            fmt::bytes(&mut buf, p.io_write_total);
-                            rp.text(slot, &buf, t.text.tertiary, Align::Right);
+                            fmt::bytes(buf, p.io_write_total);
+                            rp.text(slot, buf, t.text.tertiary, Align::Right);
                         }
                         C_FAULTS => {
-                            fmt::percent(&mut buf, p.hard_faults_per_s);
-                            rp.text(slot, &buf, t.text.tertiary, Align::Right);
+                            fmt::percent(buf, p.hard_faults_per_s);
+                            rp.text(slot, buf, t.text.tertiary, Align::Right);
                         }
                         C_DESC => rp.text(
                             slot,
@@ -387,85 +339,73 @@ impl DetailsTab {
                             &t.fonts.mono,
                         ),
                         C_VIRT => {
-                            fmt::mem_mb(&mut buf, p.virtual_size);
-                            rp.text(slot, &buf, t.text.tertiary, Align::Right);
+                            fmt::mem_mb(buf, p.virtual_size);
+                            rp.text(slot, buf, t.text.tertiary, Align::Right);
                         }
                         C_PAGED => {
-                            fmt::bytes(&mut buf, p.paged_pool);
-                            rp.text(slot, &buf, t.text.tertiary, Align::Right);
+                            fmt::bytes(buf, p.paged_pool);
+                            rp.text(slot, buf, t.text.tertiary, Align::Right);
                         }
                         C_NPPOOL => {
-                            fmt::bytes(&mut buf, p.nonpaged_pool);
-                            rp.text(slot, &buf, t.text.tertiary, Align::Right);
+                            fmt::bytes(buf, p.nonpaged_pool);
+                            rp.text(slot, buf, t.text.tertiary, Align::Right);
                         }
                         C_PFAULTS => {
-                            fmt::integer(&mut buf, p.page_faults as u64);
-                            rp.text(slot, &buf, t.text.tertiary, Align::Right);
+                            fmt::integer(buf, p.page_faults as u64);
+                            rp.text(slot, buf, t.text.tertiary, Align::Right);
                         }
                         C_CPUTIME => {
-                            fmt::cpu_time(&mut buf, p.cpu_time_100ns);
-                            rp.text_font(slot, &buf, t.text.secondary, Align::Right, &t.fonts.mono);
+                            fmt::cpu_time(buf, p.cpu_time_100ns);
+                            rp.text_font(slot, buf, t.text.secondary, Align::Right, &t.fonts.mono);
                         }
                         C_IOREAD => {
-                            fmt::rate_mbs(&mut buf, p.io_read_bps);
-                            rp.text(slot, &buf, t.text.tertiary, Align::Right);
+                            fmt::rate_mbs(buf, p.io_read_bps);
+                            rp.text(slot, buf, t.text.tertiary, Align::Right);
                         }
                         C_IOWRITE => {
-                            fmt::rate_mbs(&mut buf, p.io_write_bps);
-                            rp.text(slot, &buf, t.text.tertiary, Align::Right);
+                            fmt::rate_mbs(buf, p.io_write_bps);
+                            rp.text(slot, buf, t.text.tertiary, Align::Right);
                         }
                         C_READ_OPS => {
-                            fmt::integer(&mut buf, p.read_ops);
-                            rp.text(slot, &buf, t.text.tertiary, Align::Right);
+                            fmt::integer(buf, p.read_ops);
+                            rp.text(slot, buf, t.text.tertiary, Align::Right);
                         }
                         C_WRITE_OPS => {
-                            fmt::integer(&mut buf, p.write_ops);
-                            rp.text(slot, &buf, t.text.tertiary, Align::Right);
+                            fmt::integer(buf, p.write_ops);
+                            rp.text(slot, buf, t.text.tertiary, Align::Right);
                         }
                         C_OTHER_OPS => {
-                            fmt::integer(&mut buf, p.other_ops);
-                            rp.text(slot, &buf, t.text.tertiary, Align::Right);
+                            fmt::integer(buf, p.other_ops);
+                            rp.text(slot, buf, t.text.tertiary, Align::Right);
                         }
                         C_OTHER_BYTES => {
-                            fmt::bytes(&mut buf, p.io_other_total);
-                            rp.text(slot, &buf, t.text.tertiary, Align::Right);
+                            fmt::bytes(buf, p.io_other_total);
+                            rp.text(slot, buf, t.text.tertiary, Align::Right);
                         }
                         C_CYCLES => {
-                            fmt::integer(&mut buf, p.cycle_time);
-                            rp.text_font(slot, &buf, t.text.tertiary, Align::Right, &t.fonts.mono);
+                            fmt::integer(buf, p.cycle_time);
+                            rp.text_font(slot, buf, t.text.tertiary, Align::Right, &t.fonts.mono);
                         }
                         _ => {}
                     }
                 }
             });
 
-        self.scratch = buf;
-        self.vis = vis;
-
-        if let Some(r) = out.clicked_row.or(out.context_row) {
-            if let Some(&i) = order.get(r) {
-                self.selected = Some(snap.procs[i as usize].key());
-                self.selected_row = Some(r);
-            }
-        }
-
-        // Up and down the list. The selection is a process key rather than a row,
-        // so the row it lands on has to be turned back into one -- otherwise the
-        // next sample, which rebuilds the order, would move the selection with the
-        // row index instead of keeping it on the process.
-        if let Some(r) = super::table::list_nav(ui, self.selected_row, order.len()) {
-            if let Some(&i) = order.get(r) {
-                self.selected = Some(snap.procs[i as usize].key());
-                self.selected_row = Some(r);
-                self.table.scroll_to_row = Some(r);
-            }
-        }
+        // The selection is a process key rather than a row, so a click or an arrow
+        // key has to be turned back into one -- otherwise the next sample, which
+        // rebuilds the order, would carry the selection along with the row index
+        // instead of keeping it on the process.
+        let Self { list, order, .. } = self;
+        list.settle(ui, &out, order.len(), |r| {
+            order.get(r).map(|&i| snap.procs[i as usize].key())
+        });
 
         let target = out
             .context_row
-            .and_then(|r| order.get(r).copied())
+            .and_then(|r| self.order.get(r).copied())
             .or_else(|| {
-                self.selected
+                self.list
+                    .selected
                     .and_then(|k| snap.find_by_key(k))
                     .map(|i| i as u32)
             });
@@ -495,8 +435,6 @@ impl DetailsTab {
                 );
             }
         });
-
-        self.order = order;
     }
 }
 
