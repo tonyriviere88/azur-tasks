@@ -1,10 +1,42 @@
-//! Small Win32 helpers: wide strings, registry reads, handle RAII.
+//! Small Win32 helpers: wide strings, registry reads, handle RAII, the console.
 
 use std::os::windows::ffi::OsStrExt;
 use windows_sys::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
 use windows_sys::Win32::System::Registry::{
     RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, KEY_READ, REG_DWORD, REG_EXPAND_SZ, REG_SZ,
 };
+
+/// Borrow the console of whatever launched this, if there is one.
+///
+/// This is a `windows` subsystem binary in every profile -- see the attribute at the top of
+/// [`crate`] -- so it never *creates* a console, which is the point: a window that flashes a
+/// black one open behind itself on every launch is the thing that gate was costing. What it
+/// costs instead is the standard handles. A `windows` subsystem process starts with none, so
+/// `AZTM_TRACE_SAMPLE`'s per-phase timings, the `memtrace` figures and a panic message all
+/// write into nothing -- and Rust's `write`
+/// for stdout treats "no stdio handle" as a successful write of every byte, so they fail
+/// *silently*, which is the worst of the available failures.
+///
+/// `ATTACH_PARENT_PROCESS` is the whole of the fix. If the parent has a console -- a shell,
+/// or `cargo claude-run` -- this process joins it, and `println!` reaches it because std asks
+/// `GetStdHandle` on every write rather than caching a handle at startup. If the parent has
+/// none -- Explorer, a pinned shortcut, the Startup folder -- the call fails and creates
+/// nothing, which is exactly what a launch from there wants. Either way there is nothing to
+/// undo on the way out: the console belongs to the shell and outlives us.
+///
+/// What it cannot fix is the ordering. A `windows` subsystem process does not hold the shell
+/// that started it, so the prompt comes back first and this program's output lands underneath
+/// it. That is a cosmetic oddity of every GUI program that prints, and the alternative -- a
+/// console of our own -- is the thing being avoided.
+pub fn attach_parent_console() {
+    // Failing is the ordinary case rather than the exception: launched from anywhere that is
+    // not a console there is no parent console to attach to, and that is how this program is
+    // usually started.
+    unsafe {
+        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
 
 /// A NUL-terminated UTF-16 buffer suitable for `PCWSTR` parameters.
 pub fn wide(s: &str) -> Vec<u16> {

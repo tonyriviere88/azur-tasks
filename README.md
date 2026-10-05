@@ -392,6 +392,9 @@ its own and `cargo build` does not build it. Ask for it by name when it is neede
 cargo run --features memprobe --bin memprobe
 ```
 
+An assistant in this checkout builds through `cargo claude-*` instead, into
+`target/claude` — see below.
+
 For development use `cargo build --profile fast`, which is the release profile
 without `lto = "fat"` and `codegen-units = 1`. Those two make a *link* of the
 whole dependency graph part of every build, on one core: a one-line change costs
@@ -427,6 +430,57 @@ is a build-time opt-in. It is what proved the growth above was *not* on the Rust
 heap — live bytes sat at 10.8 MB while private bytes climbed — and so stopped a
 long search through this codebase for a leak that was never in it. The same build
 accepts `AZTM_UI_LEVEL=0..3` and `AZTM_NO_ICONS=1` to bisect the paint path.
+
+### No console, in any profile
+
+`#![cfg_attr(not(test), windows_subsystem = "windows")]`. This used to ask `build.rs` which
+profile was being built and take the console only for a release one — a dev build kept its
+console, on the reasoning that panics and the sampler's diagnostics need somewhere to go — and
+what that cost was a black window opening behind the application on every dev launch.
+
+Two things make dropping it free. `sys::util::attach_parent_console` calls
+`AttachConsole(ATTACH_PARENT_PROCESS)`, so a launch from a shell or from `cargo run` *borrows*
+that console and `AZTM_TRACE_SAMPLE`, the `memtrace` figures and a panic message all still
+print — while a launch from Explorer, a pinned shortcut or the Startup folder finds no parent
+console, creates nothing, and flashes no window. What it cannot fix is the ordering: a
+`windows` subsystem process does not hold the shell that started it, so the prompt comes back
+first and the output lands underneath it.
+
+And the guard is `not(test)` rather than nothing at all, because the test harness is this same
+crate root: a `windows` subsystem test binary has no standard handles, and std reports "no
+stdio handle" as a **successful** write of every byte — so the machine reports the probes in
+`sys` print (`pdh`, `etw`, `sensors`, `actions`) would come out empty and still exit 0.
+`memprobe` is a separate crate root and keeps its console, which is right: it is a
+shell tool whose whole output is numbers.
+
+### `cargo claude-*`, for an agent in the same checkout
+
+An assistant working in this repository shares one `target/` with whoever is sitting at it, and
+that is worth separating.
+
+```
+cargo claude-build            target/claude, not target/debug
+cargo claude-test             the same, for the test binaries
+cargo claude-clippy           -D warnings, so a warning cannot be scrolled past
+cargo claude-doc              the intra-doc links this codebase leans on
+cargo claude-run              the window, out of the developer's artifacts
+```
+
+Cargo keys its fingerprints on the profile, so an agent's `cargo test` and an editor's
+rust-analyzer take turns invalidating one another's artifacts — and on Windows they take turns
+*locking* them, which surfaces as "did not finalize incremental compilation session directory:
+Access denied" and throws that compilation's work away. [`profile.claude`](Cargo.toml)
+inherits `dev` and changes nothing else, so what those aliases build is the same code
+`cargo build` builds; all it buys is the directory. Package overrides come with the
+inheritance, so `[profile.dev.package."*"]` still gives dependencies `opt-level = 3` there —
+which matters, because a debug-build wgpu would make the window unusable to click around in.
+
+What is **not** separated is `%APPDATA%`. Unlike the sibling widget, this program has no
+command line, so `cargo claude-run` reads and writes the same
+`%APPDATA%\Azur Task Manager\settings.ini` as the copy you use — and since a window is
+checked by resizing it and dragging columns, that is exactly what writes. Deleting the file
+costs nothing load-bearing, but a layout you arranged is gone. A `--profile <name>` flag like
+Azur Audio Switcher's is what would close this.
 
 ### Binary size
 

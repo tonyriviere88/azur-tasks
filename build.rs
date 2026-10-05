@@ -46,21 +46,6 @@ fn main() {
     println!("cargo:rerun-if-changed=assets/app.ico");
     println!("cargo:rerun-if-changed=build.rs");
 
-    // Declare the GUI subsystem for a release build. The loader hands a console
-    // only to `IMAGE_SUBSYSTEM_WINDOWS_CUI` images, so this is what stops a
-    // console window from opening behind the app; `main.rs` carries the attribute
-    // that does it, and only a build script can see which profile is being built.
-    //
-    // Cargo reports `release` for `--release` and for every profile that inherits
-    // it (`--profile fast`), and `debug` for the dev profile -- exactly the split
-    // wanted, since a dev build keeps its console so panics and logging stay
-    // visible. Keyed on the profile rather than on `debug_assertions`, so enabling
-    // assertions in a release profile cannot quietly bring the console back.
-    println!("cargo::rustc-check-cfg=cfg(gui_subsystem)");
-    if env::var("PROFILE").as_deref() == Ok("release") {
-        println!("cargo::rustc-cfg=gui_subsystem");
-    }
-
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
     let ico = fs::read("assets/app.ico").expect("assets/app.ico is missing");
     let images = parse_ico(&ico);

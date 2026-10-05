@@ -1,8 +1,18 @@
-// Detach from the console so launching from Explorer does not flash a window.
-// `build.rs` sets `gui_subsystem` for a release build (and for anything that
-// inherits it, such as `--profile fast`); a dev build keeps its console so panics
-// and logging stay visible.
-#![cfg_attr(gui_subsystem, windows_subsystem = "windows")]
+// A `windows` subsystem binary in every profile: no console, ever. This used to ask
+// `build.rs` which profile was being built and take the console only for a release one, on
+// the reasoning that a dev build wants somewhere for panics and the diagnostics to go -- and
+// the price was a black console window opening behind the application on every dev launch,
+// including every `cargo claude-run`. `sys::util::attach_parent_console` is what keeps the
+// other half working: it borrows the console of whatever launched this, so `AZTM_TRACE_SAMPLE`,
+// the `memtrace` figures and a panic message all still reach a shell without one ever being
+// *created* for a launch from Explorer, a pinned shortcut or the Startup folder.
+//
+// `not(test)` and not an unconditional attribute, because the test harness is this same
+// crate root: a `windows` subsystem test binary has no standard handles, and std reports "no
+// stdio handle" as a *successful* write of every byte -- so the machine reports the probes in
+// `sys` print (`pdh`, `etw`, `sensors`, `actions`) would come out empty and still exit 0.
+// The one thing worse than a silent program is a silent test run.
+#![cfg_attr(not(test), windows_subsystem = "windows")]
 
 mod app;
 #[cfg(feature = "memtrace")]
@@ -63,6 +73,12 @@ fn wgpu_config() -> eframe::egui_wgpu::WgpuConfiguration {
 }
 
 fn main() -> eframe::Result<()> {
+    // Before anything that can print, and before the sampler thread that `AZTM_TRACE_SAMPLE`
+    // makes print. This is a `windows` subsystem binary, so stdout and stderr reach a shell
+    // only if there is one to borrow, and silently swallow every byte if there is not. See
+    // the attribute at the top of this file.
+    sys::util::attach_parent_console();
+
     // wgpu is the only renderer, and there is no environment variable for the other
     // one because the other one is no longer compiled in. See `wgpu_config` for which
     // backend, and why that part is not decided here; `AZUR_BACKEND` changes backend

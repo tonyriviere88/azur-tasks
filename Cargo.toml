@@ -94,6 +94,10 @@ features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Storage_FileSystem",
+    # `AttachConsole`, so that the memtrace diagnostics and a panic reach a shell. This
+    # binary is a `windows` subsystem binary in every profile, so it has no standard
+    # handles of its own and has to borrow the parent's -- see `sys::util`.
+    "Win32_System_Console",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_Diagnostics_Etw",
     "Win32_System_Environment",
@@ -164,6 +168,28 @@ lto = false
 codegen-units = 16
 incremental = true
 strip = "none"
+
+# The profile behind `cargo claude-*` -- see the aliases in `.cargo/config.toml`.
+#
+# `dev` and nothing else, on purpose: what an assistant builds has to be what the
+# developer builds, or a green agent run says nothing about the repository. Not `fast`
+# either, tempting as a release-grade profile looks for a program whose whole subject is
+# latency -- `fast` is the profile to *measure* on, and a second builder competing for the
+# machine is the condition under which a measurement means least.
+#
+# All this buys is the *directory*, and that is enough. Cargo puts a custom profile's
+# artifacts in `target/<name>`, so two builders stop invalidating one shared
+# `target/debug` -- and on Windows stop taking turns locking it, which is what "did not
+# finalize incremental compilation session directory: Access denied" is, and that
+# compilation's work is thrown away when it happens. Cargo copies a parent's package
+# overrides along with the rest, so `[profile.dev.package."*"]` below still reaches
+# dependencies here (checked: a dependency compiles at `opt-level=3` under this profile)
+# -- which matters, because a debug-build wgpu would make the window unusable.
+#
+# No `strip`, no `opt-level`, no `debug = 0`: every one of those would be a second set of
+# compiler flags to hold in mind when a test passes here and fails there.
+[profile.claude]
+inherits = "dev"
 
 # Keep dependencies optimized in dev builds too; a debug-build wgpu is unusably
 # slow and would make the latency work impossible to evaluate.
