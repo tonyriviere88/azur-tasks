@@ -1,6 +1,6 @@
 <img src="assets/app-256.png" alt="" width="104" align="right">
 
-# Azur Task Manager
+# Azur Tasks
 
 A Windows task manager built for low latency and a small footprint: a summary
 page, process hierarchy, a full details grid, live performance graphs, sensors,
@@ -23,7 +23,7 @@ sat idle (24 logical cores, 64 GB RAM, ~550 processes, ~9,300 threads):
 Binary is 10.7 MB with no runtime dependencies beyond what ships with Windows.
 
 Nearly all of the remaining CPU is the cost of *getting* the data, not showing
-it. Per one-second tick (`AZTM_TRACE_SAMPLE=1`):
+it. Per one-second tick (`AZT_TRACE_SAMPLE=1`):
 
 ```
 total 24.1 ms   procs 20.1   net 1.8   gpu 1.3   windows 0.5   mem 0.4
@@ -410,7 +410,7 @@ fault.
 
 ## Saved state
 
-`%APPDATA%\Azur Task Manager\settings.ini`, flat `key=value` text, written at
+`%APPDATA%\Azur Tasks\settings.ini`, flat `key=value` text, written at
 most once every two seconds and again on exit:
 
 - window position and inner size (and whether it was maximized)
@@ -427,7 +427,7 @@ off-screen. The file is safe to delete; nothing in it is load-bearing.
 
 ```
 cargo build --release
-./target/release/azur-task-manager.exe
+./target/release/azur-tasks.exe
 cargo deploy                    release build, then copy it to D:\Programs
 cargo deploy --profile fast     the iteration build, for once
 ```
@@ -470,7 +470,7 @@ application by name rather than for whatever the profile directory happens to ho
 
 Environment variables:
 
-- `AZTM_TRACE_SAMPLE=1` — print per-phase sampler timings to stderr.
+- `AZT_TRACE_SAMPLE=1` — print per-phase sampler timings to stderr.
 - `AZUR_BACKEND`, `AZUR_ADAPTER=low` — the design system's, and the only renderer
   knobs there are; there is no `AZTM_RENDERER` any more (see the renderer note
   above).
@@ -481,7 +481,7 @@ container once per sample. It costs two atomics per allocation, which is why it
 is a build-time opt-in. It is what proved the growth above was *not* on the Rust
 heap — live bytes sat at 10.8 MB while private bytes climbed — and so stopped a
 long search through this codebase for a leak that was never in it. The same build
-accepts `AZTM_UI_LEVEL=0..3` and `AZTM_NO_ICONS=1` to bisect the paint path.
+accepts `AZT_UI_LEVEL=0..3` and `AZT_NO_ICONS=1` to bisect the paint path.
 
 ### No console, in any profile
 
@@ -492,7 +492,7 @@ what that cost was a black window opening behind the application on every dev la
 
 Two things make dropping it free. `sys::util::attach_parent_console` calls
 `AttachConsole(ATTACH_PARENT_PROCESS)`, so a launch from a shell or from `cargo run` *borrows*
-that console and `AZTM_TRACE_SAMPLE`, the `memtrace` figures and a panic message all still
+that console and `AZT_TRACE_SAMPLE`, the `memtrace` figures and a panic message all still
 print — while a launch from Explorer, a pinned shortcut or the Startup folder finds no parent
 console, creates nothing, and flashes no window. What it cannot fix is the ordering: a
 `windows` subsystem process does not hold the shell that started it, so the prompt comes back
@@ -529,7 +529,7 @@ which matters, because a debug-build wgpu would make the window unusable to clic
 
 What is **not** separated is `%APPDATA%`. Unlike the sibling widget, this program has no
 command line, so `cargo claude-run` reads and writes the same
-`%APPDATA%\Azur Task Manager\settings.ini` as the copy you use — and since a window is
+`%APPDATA%\Azur Tasks\settings.ini` as the copy you use — and since a window is
 checked by resizing it and dragging columns, that is exactly what writes. Deleting the file
 costs nothing load-bearing, but a layout you arranged is gone. A `--profile <name>` flag like
 Azur Audio Switcher's is what would close this.
@@ -703,8 +703,8 @@ have:
   rather than all of them. To re-check on another machine:
 
   ```
-  set AZTM_PROBE_SECS=8
-  cargo test --bin azur-task-manager probes_the_frame_providers -- --ignored --nocapture
+  set AZT_PROBE_SECS=8
+  cargo test --bin azur-tasks probes_the_frame_providers -- --ignored --nocapture
   ```
 
   It prints every event kind the providers emit with the rate it implies for the

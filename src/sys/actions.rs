@@ -366,7 +366,7 @@ pub fn run_new_task(at: Option<(i32, i32)>) -> ActionResult {
     // thread list -- which is a thing this application can show. The default stack:
     // this thread runs a shell dialog, not a small task of ours.
     std::thread::Builder::new()
-        .name("aztm-run-dialog".into())
+        .name("azt-run-dialog".into())
         .spawn(move || {
             // The dialog runs the shell to start what is typed into it, and the
             // thread it runs on is this one.
@@ -530,7 +530,7 @@ mod tests {
     /// arguments until something is looked up on disk.
     #[test]
     fn resolves_an_unquoted_path_that_has_spaces_in_it() {
-        let dir = std::env::temp_dir().join("aztm exec test");
+        let dir = std::env::temp_dir().join("azt exec test");
         std::fs::create_dir_all(&dir).unwrap();
         let exe = dir.join("my app.exe");
         std::fs::write(&exe, b"not really an executable").unwrap();
@@ -617,7 +617,7 @@ mod tests {
     /// A shortcut is the item, so its own folder is the one to open.
     #[test]
     fn treats_a_shortcut_as_the_thing_it_is() {
-        let dir = std::env::temp_dir().join("aztm lnk test");
+        let dir = std::env::temp_dir().join("azt lnk test");
         std::fs::create_dir_all(&dir).unwrap();
         let lnk = dir.join("Some App.lnk");
         std::fs::write(&lnk, b"x").unwrap();

@@ -167,7 +167,7 @@ impl Inspector {
         let latest: Arc<ArcSwapOption<Inspection>> = Arc::new(ArcSwapOption::empty());
         let published = Arc::clone(&latest);
         std::thread::Builder::new()
-            .name("aztm-inspect".into())
+            .name("azt-inspect".into())
             .spawn(move || worker(rx, published, notify))
             .expect("spawn inspector worker");
         Self { tx, latest }

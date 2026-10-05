@@ -1,9 +1,9 @@
 //! Isolation probe: a bare eframe window with a single label.
 //!
 //! Used to separate the framework's baseline memory cost -- and, with
-//! `AZTM_PROBE_SPIN=1`, its per-frame memory *growth* -- from this app's own.
+//! `AZT_PROBE_SPIN=1`, its per-frame memory *growth* -- from this app's own.
 //!
-//! wgpu only. `AZTM_PROBE_RENDERER=glow` was how this probe produced the
+//! wgpu only. `AZT_PROBE_RENDERER=glow` was how this probe produced the
 //! bytes-per-frame table in the README, and the renderer it selected is no longer in
 //! the graph -- eframe's `glow` feature was 205,824 bytes of executable for a
 //! renderer that lost. Re-running that comparison means adding the feature back for
@@ -28,7 +28,7 @@ fn main() -> eframe::Result<()> {
     // measures is the one the application actually pays. The backend comes from
     // `azur_egui_theme::render` for that reason: a probe on a different backend
     // measures a different framework.
-    if std::env::var_os("AZTM_PROBE_ALL_BACKENDS").is_none() {
+    if std::env::var_os("AZT_PROBE_ALL_BACKENDS").is_none() {
         use eframe::wgpu;
         if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup
         {
@@ -37,18 +37,18 @@ fn main() -> eframe::Result<()> {
         }
     }
 
-    let spin = std::env::var_os("AZTM_PROBE_SPIN").is_some();
+    let spin = std::env::var_os("AZT_PROBE_SPIN").is_some();
     // Number of text cells to paint per frame. A real table paints a few
     // hundred, and text is what dominates the vertex data egui uploads, so this
     // is the knob that decides whether growth follows submitted work.
-    let cells: usize = std::env::var("AZTM_PROBE_CELLS")
+    let cells: usize = std::env::var("AZT_PROBE_CELLS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
-    // `AZTM_PROBE_JITTER=1` varies the cell count every frame, so the vertex
+    // `AZT_PROBE_JITTER=1` varies the cell count every frame, so the vertex
     // buffer egui hands the driver is a different size each time. A fixed count
     // hands it the same size over and over, which is the case that stayed flat.
-    let jitter = std::env::var_os("AZTM_PROBE_JITTER").is_some();
+    let jitter = std::env::var_os("AZT_PROBE_JITTER").is_some();
 
     eframe::run_native(
         "memprobe",

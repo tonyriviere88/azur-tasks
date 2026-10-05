@@ -332,7 +332,7 @@ impl eframe::App for App {
             .show_separator_line(false)
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
-                match TitleBar::new("Azur Task Manager")
+                match TitleBar::new(crate::PRODUCT_NAME)
                     // The product mark, not a nav glyph — and the same artwork the
                     // taskbar button and the `.exe` in Explorer wear, reduced to the
                     // size this box is in pixels rather than redrawn for it.

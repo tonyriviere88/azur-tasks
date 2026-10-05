@@ -40,7 +40,7 @@
 # cannot miss.
 #
 # Note what `claude-run` does *not* do: this program has no `--profile` of its own, so it
-# reads and writes the one `%APPDATA%\Azur Task Manager\settings.ini` a person's window
+# reads and writes the one `%APPDATA%\Azur Tasks\settings.ini` a person's window
 # layout and column widths live in. Until it has one, running it from here costs them that
 # layout -- the sibling widget grew a `--profile` flag for exactly this reason.
 [alias]

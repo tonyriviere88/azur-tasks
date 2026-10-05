@@ -187,7 +187,7 @@ impl FrameMonitor {
         let table: Arc<Mutex<Table>> = Arc::new(Mutex::new(Table::default()));
         let stopping = Arc::new(AtomicBool::new(false));
 
-        let session = match Session::start("aztm-frames") {
+        let session = match Session::start("azt-frames") {
             Ok(s) => s,
             // `ERROR_ACCESS_DENIED`. The expected outcome, not an error worth noise.
             Err(5) => {
@@ -220,7 +220,7 @@ impl FrameMonitor {
             let stopping = Arc::clone(&stopping);
             let name = session.name().to_vec();
             std::thread::Builder::new()
-                .name("aztm-frames".into())
+                .name("azt-frames".into())
                 .spawn(move || {
                     let mut sink = |e: &Event, _raw: *const _| {
                         if stopping.load(Ordering::Relaxed) {

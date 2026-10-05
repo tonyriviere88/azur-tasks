@@ -13,7 +13,7 @@ use windows_sys::Win32::System::Registry::{
 /// [`crate`] -- so it never *creates* a console, which is the point: a window that flashes a
 /// black one open behind itself on every launch is the thing that gate was costing. What it
 /// costs instead is the standard handles. A `windows` subsystem process starts with none, so
-/// `AZTM_TRACE_SAMPLE`'s per-phase timings, the `memtrace` figures and a panic message all
+/// `AZT_TRACE_SAMPLE`'s per-phase timings, the `memtrace` figures and a panic message all
 /// write into nothing -- and Rust's `write`
 /// for stdout treats "no stdio handle" as a successful write of every byte, so they fail
 /// *silently*, which is the worst of the available failures.

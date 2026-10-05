@@ -135,7 +135,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "azur-task-manager"
+name = "azur-tasks"
 version = "0.1.0"
 dependencies = [
  "arc-swap",

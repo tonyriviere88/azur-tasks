@@ -1,19 +1,19 @@
 [package]
-name = "azur-task-manager"
+name = "azur-tasks"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
-description = "Azur Task Manager - a fast, low-footprint Windows task manager"
+description = "Azur Tasks - a fast, low-footprint Windows task manager"
 publish = false
 
 # `src/bin/memprobe.rs` is a second binary -- a bare eframe window, for telling
 # framework memory cost apart from ours -- which is enough to make `cargo run`
 # refuse to guess. Name the application, so the plain commands mean the
 # application and the probe is the one that has to be asked for by name.
-default-run = "azur-task-manager"
+default-run = "azur-tasks"
 
 [[bin]]
-name = "azur-task-manager"
+name = "azur-tasks"
 path = "src/main.rs"
 
 # The probe is a measurement tool, not part of the product: it is built only when

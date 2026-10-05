@@ -1078,7 +1078,7 @@ mod tests {
     fn fixture(pid: u32) -> Proc {
         Proc {
             pid,
-            name: "aztm-test.exe".into(),
+            name: "azt-test.exe".into(),
             cpu: 1.5,
             // A part of the CPU figure above, so the band inside the trace has some
             // height to it and the mesh count below is counting something.

@@ -57,7 +57,8 @@ fn main() {
         let res = out.join("app.res");
         fs::write(&res, build_res(&images)).unwrap();
         println!(
-            "cargo:rustc-link-arg-bin=azur-task-manager={}",
+            "cargo:rustc-link-arg-bin={}={}",
+            env!("CARGO_PKG_NAME"),
             res.display()
         );
     }
@@ -195,11 +196,12 @@ fn version_info() -> Vec<u8> {
                 // The product family, not a company: this is a personal tool and
                 // the field is the only place a publisher can be stated at all.
                 Node::string("CompanyName", "Azur"),
-                Node::string("FileDescription", "Azur Task Manager"),
+                // `PRODUCT_NAME` in `main.rs`, which a build script cannot import.
+                Node::string("FileDescription", "Azur Tasks"),
                 Node::string("FileVersion", &version),
-                Node::string("InternalName", "azur-task-manager"),
-                Node::string("OriginalFilename", "azur-task-manager.exe"),
-                Node::string("ProductName", "Azur Task Manager"),
+                Node::string("InternalName", env!("CARGO_PKG_NAME")),
+                Node::string("OriginalFilename", concat!(env!("CARGO_PKG_NAME"), ".exe")),
+                Node::string("ProductName", "Azur Tasks"),
                 Node::string("ProductVersion", &version),
             ],
         )],

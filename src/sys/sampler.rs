@@ -114,7 +114,7 @@ pub fn start_with_notify(
     };
 
     std::thread::Builder::new()
-        .name("aztm-sampler".into())
+        .name("azt-sampler".into())
         .spawn(move || {
             let mut sampler = Sampler::new(meta);
             let mut pool: Vec<Arc<Snapshot>> = Vec::with_capacity(4);
@@ -285,7 +285,7 @@ impl Sampler {
         out.generation = self.generation;
         out.interval = dt;
 
-        let trace = std::env::var_os("AZTM_TRACE_SAMPLE").is_some();
+        let trace = std::env::var_os("AZT_TRACE_SAMPLE").is_some();
         let mut mark = Instant::now();
         let mut timings: Vec<(&str, f32)> = Vec::new();
         macro_rules! phase {

@@ -367,7 +367,7 @@ mod tests {
             }
         }
 
-        let name = format!("aztm.selftest.{}", std::process::id());
+        let name = format!("azt.selftest.{}", std::process::id());
         let _scratch = Scratch(wide(&name));
         let entry = StartupEntry {
             name: Arc::from(name.as_str()),

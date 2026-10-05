@@ -3,7 +3,7 @@
 // the reasoning that a dev build wants somewhere for panics and the diagnostics to go -- and
 // the price was a black console window opening behind the application on every dev launch,
 // including every `cargo claude-run`. `sys::util::attach_parent_console` is what keeps the
-// other half working: it borrows the console of whatever launched this, so `AZTM_TRACE_SAMPLE`,
+// other half working: it borrows the console of whatever launched this, so `AZT_TRACE_SAMPLE`,
 // the `memtrace` figures and a panic message all still reach a shell without one ever being
 // *created* for a launch from Explorer, a pinned shortcut or the Startup folder.
 //
@@ -38,6 +38,10 @@ static ALLOC: memtrace::Counting = memtrace::Counting;
 /// clean box reduction of an image with fine detail in it — the trace across the
 /// window, and the gear's ring — so an exact factor is worth more here than a larger
 /// source would be. `ui::app_mark` reads the same file for the title bar.
+/// The name a person sees: window title, title bar, taskbar, `%APPDATA%` folder.
+/// `build.rs` cannot import it and repeats it for the `.exe`'s version resource.
+pub const PRODUCT_NAME: &str = "Azur Tasks";
+
 const WINDOW_ICON: &[u8] = include_bytes!("../assets/app-64.png");
 
 /// The graphics configuration, which this program no longer decides.
@@ -73,7 +77,7 @@ fn wgpu_config() -> eframe::egui_wgpu::WgpuConfiguration {
 }
 
 fn main() -> eframe::Result<()> {
-    // Before anything that can print, and before the sampler thread that `AZTM_TRACE_SAMPLE`
+    // Before anything that can print, and before the sampler thread that `AZT_TRACE_SAMPLE`
     // makes print. This is a `windows` subsystem binary, so stdout and stderr reach a shell
     // only if there is one to borrow, and silently swallow every byte if there is not. See
     // the attribute at the top of this file.
@@ -106,8 +110,8 @@ fn main() -> eframe::Result<()> {
         // caption and the rail collapses to icons, so this stays usable rather
         // than merely permitted.
         .with_min_inner_size([500.0, 400.0])
-        .with_title("Azur Task Manager")
-        .with_app_id("aztm")
+        .with_title(PRODUCT_NAME)
+        .with_app_id("azt")
         // The window draws Azur's own `TitleBar`, so it asks the platform not to
         // draw a second one. The frame keeps its shadow and its resize borders;
         // only the caption is ours.
@@ -147,7 +151,7 @@ fn main() -> eframe::Result<()> {
     };
 
     eframe::run_native(
-        "Azur Task Manager",
+        PRODUCT_NAME,
         options,
         Box::new(move |cc| Ok(Box::new(app::App::new(cc, settings)))),
     )

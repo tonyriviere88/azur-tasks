@@ -1042,7 +1042,16 @@ fn paint_metric(ui: &Ui, t: &Theme, card: Rect, m: &Metric<'_>, head: &Head, hov
     let detail = p.layout_no_wrap(
         fmt::elide_to_width(ui, &m.detail, &t.fonts.caption, card.width() - pad * 2.0),
         t.fonts.caption.clone(),
-        t.text.tertiary,
+        // `text-secondary`, not the `text-tertiary` this line reads as -- a second
+        // line under a headline. What is on it is not metadata: the clock, the
+        // package temperature and the power draw are the sensor readings this page
+        // shows anywhere at all, and on the disk card the saturation figure is the
+        // one number here that can be too high. At `SIZE_CAPTION` tertiary measures
+        // 3.6:1 on `bg.card` and 3.3:1 once the pointer lifts the card, both under
+        // the 4.5:1 WCAG asks of small text; secondary is 6.6:1 and 6.1:1. The same
+        // ink as the label on the line above, which is what it is -- caption-size
+        // supporting text, twice.
+        t.text.secondary,
     );
     galley_on_baseline(p, card.left() + pad, detail_base, detail);
 }

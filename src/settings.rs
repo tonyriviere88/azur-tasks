@@ -1,6 +1,6 @@
 //! Persisted UI state: window geometry, nav-rail state, per-table columns.
 //!
-//! Stored as flat `key=value` text in `%APPDATA%\Azur Task Manager\settings.ini`,
+//! Stored as flat `key=value` text in `%APPDATA%\Azur Tasks\settings.ini`,
 //! parsed by hand. A settings file is a dozen scalars and a few column widths;
 //! reaching for a serialization crate would pull in a derive macro and a parser
 //! to avoid writing thirty lines.
@@ -13,7 +13,7 @@
 use crate::ui::sensors::Layout;
 use crate::ui::table::Table;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// How long to wait before writing after something changes. Dragging a window
@@ -32,7 +32,10 @@ pub struct Settings {
 
 impl Settings {
     pub fn load() -> Self {
-        let path = dir().map(|d| d.join("settings.ini"));
+        let path = dir().map(|d| {
+            migrate_legacy_dir(&d);
+            d.join("settings.ini")
+        });
         let mut values = BTreeMap::new();
         if let Some(p) = &path {
             if let Ok(text) = std::fs::read_to_string(p) {
@@ -262,7 +265,9 @@ impl Settings {
             }
         }
         let mut text = String::with_capacity(self.values.len() * 24);
-        text.push_str("# Azur Task Manager -- UI state. Safe to delete.\n");
+        text.push_str("# ");
+        text.push_str(crate::PRODUCT_NAME);
+        text.push_str(" -- UI state. Safe to delete.\n");
         for (k, v) in &self.values {
             text.push_str(k);
             text.push('=');
@@ -288,13 +293,19 @@ fn split(v: &str) -> Vec<String> {
 fn dir() -> Option<PathBuf> {
     // APPDATA is the roaming profile. Reading the environment avoids
     // SHGetKnownFolderPath and its COM-allocated string.
-    let base = std::env::var_os("APPDATA")?;
-    if base.is_empty() {
-        return None;
-    }
+    let base = PathBuf::from(std::env::var_os("APPDATA").filter(|b| !b.is_empty())?);
     // The product name, spaces and all: this is a folder a person goes looking
     // for in Explorer, and it sits among others named the same way.
-    Some(PathBuf::from(base).join("Azur Task Manager"))
+    Some(base.join(crate::PRODUCT_NAME))
+}
+
+/// The application was called "Azur Task Manager" until it was renamed, and that
+/// folder holds someone's layout. Move it rather than start them over; if the move
+/// fails they get the defaults, which is all a fresh folder costs.
+fn migrate_legacy_dir(dir: &Path) {
+    if let Some(base) = dir.parent().filter(|_| !dir.exists()) {
+        let _ = std::fs::rename(base.join("Azur Task Manager"), dir);
+    }
 }
 
 #[cfg(test)]

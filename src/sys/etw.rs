@@ -387,8 +387,8 @@ mod tests {
     /// the frame numbers on the Sensors tab:
     ///
     /// ```text
-    /// set AZTM_PROBE_SECS=8
-    /// cargo test --bin azur-task-manager probes_the_frame_providers -- --ignored --nocapture
+    /// set AZT_PROBE_SECS=8
+    /// cargo test --bin azur-tasks probes_the_frame_providers -- --ignored --nocapture
     /// ```
     ///
     /// It starts the same session the app starts, watches for a few seconds, and
@@ -407,12 +407,12 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::{Arc, Mutex};
 
-        let seconds: u64 = std::env::var("AZTM_PROBE_SECS")
+        let seconds: u64 = std::env::var("AZT_PROBE_SECS")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(8);
 
-        let session = match Session::start("aztm-frameprobe") {
+        let session = match Session::start("azt-frameprobe") {
             Ok(s) => s,
             Err(5) => panic!(
                 "Access denied: an ETW session needs administrator rights. \
