@@ -427,6 +427,16 @@ fn metrics<'a>(snap: &'a Snapshot, t: &Theme) -> Vec<Metric<'a>> {
             }
             let _ = write!(detail, "{c:.0} °C");
         }
+        // Named, where the edge temperature above is not: two bare °C figures on one
+        // line leave the reader to work out which is which. Present only where the
+        // device publishes a junction reading -- an AMD feature -- so on every other
+        // board the segment is absent rather than empty, as on the Sensors tab.
+        if let Some(c) = sens.and_then(|x| x.hotspot_c) {
+            if !detail.is_empty() {
+                detail.push_str(" · ");
+            }
+            let _ = write!(detail, "{c:.0} °C");
+        }
         // An integrated adapter reports neither dedicated memory nor a temperature
         // of its own, so the line says which adapter this is rather than nothing.
         if detail.is_empty() {
