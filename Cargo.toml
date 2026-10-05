@@ -1,0 +1,93 @@
+[package]
+name = "yatm"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Yet Another Task Manager - a fast, low-footprint Windows task manager"
+publish = false
+
+[[bin]]
+name = "yatm"
+path = "src/main.rs"
+
+[features]
+# Account for live heap bytes and print them each tick. Costs two atomics per
+# allocation, so it is a build-time opt-in rather than a runtime flag.
+memtrace = []
+
+[dependencies]
+# UI: immediate-mode, GPU-composited through wgpu -> DirectX 12.
+eframe = { version = "0.35", default-features = false, features = [
+    "wgpu",
+    "glow",
+    "default_fonts",
+] }
+egui = { version = "0.35", default-features = false }
+
+# Lock-free snapshot handoff from the sampler thread to the UI thread.
+arc-swap = "1.9"
+
+# Fast, non-DoS-resistant hashing. We hash PIDs, not attacker input.
+rustc-hash = "2.1"
+
+# Cheaper, smaller mutexes than std for the few places we need them.
+parking_lot = "0.12"
+
+[dependencies.windows-sys]
+version = "0.61"
+features = [
+    "Wdk_System_SystemInformation",
+    "Wdk_System_SystemServices",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Performance",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
+    "Win32_System_Services",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_System_Time",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_System_Com",
+]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+# Iteration profile: release code generation without the two settings that make
+# a one-line change cost two minutes. `lto = "fat"` re-runs cross-crate
+# optimization over the whole graph on every link, and `codegen-units = 1`
+# refuses to use more than one core doing it. Neither changes behaviour, so this
+# is the profile to develop against; ship with `--release`.
+#
+#   cargo build --profile fast
+[profile.fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+strip = "none"
+
+# Keep dependencies optimized in dev builds too; a debug-build wgpu is unusably
+# slow and would make the latency work impossible to evaluate.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
