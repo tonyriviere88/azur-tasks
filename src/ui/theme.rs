@@ -85,6 +85,30 @@ impl Theme {
     pub fn load_text(&self, pct: f32) -> Color32 {
         self.threshold_text(pct, 60.0, 90.0)
     }
+
+    /// Commit charge, on the graph that draws the resident memory inside it.
+    ///
+    /// The memory hue, dimmed: private commit is the *envelope* -- everything the
+    /// process has asked for, paged out or not -- and the working set inside it is
+    /// the part that is in RAM right now. The same hue because they are one quantity
+    /// at two sizes, and the dimmer of the two because the bright one is the figure a
+    /// reader looks at first. Dimmed only as far as a caption in it stays legible,
+    /// since the same colour labels the series.
+    pub fn mem_commit(&self) -> Color32 {
+        self.mem.gamma_multiply(0.72)
+    }
+
+    /// Kernel time, on the two graphs that draw it inside the CPU total.
+    ///
+    /// Red — the convention every tool that draws this figure uses, and the one
+    /// colour on the page that cannot be mistaken for the azure it sits inside. It
+    /// is the status hue rather than a red of its own, for the reason the series
+    /// palette gives: a red line and a red number should mean the same thing.
+    /// Shared from here because the Performance and Summary tabs both draw it, and
+    /// two constants would drift.
+    pub fn cpu_kernel(&self) -> Color32 {
+        self.status.danger
+    }
 }
 
 /// Install fonts and the Azur styling on the egui context.

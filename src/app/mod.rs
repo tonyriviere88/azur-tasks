@@ -426,7 +426,7 @@ impl eframe::App for App {
                 // much of a process table you are willing to give up to see its
                 // threads is not something this app can decide for you.
                 if self.inspector_open && self.tab.is_process_list() {
-                    let (pid, name) = self.inspected(snap);
+                    let proc = self.inspected(snap);
                     let view = ui.available_height();
                     // `default_size` is consulted only when egui has no remembered
                     // size for this panel, which is the first time it is shown in a
@@ -447,14 +447,7 @@ impl eframe::App for App {
                         .show_separator_line(false)
                         .frame(azur::desktop::panel(&theme))
                         .show(ui, |ui| {
-                            self.inspector.ui(
-                                ui,
-                                &theme,
-                                pid,
-                                name.as_deref(),
-                                snap.generation,
-                                &mut action,
-                            )
+                            self.inspector.ui(ui, &theme, proc, snap.generation, &mut action)
                         });
                     if panel.inner {
                         self.inspector_open = false;

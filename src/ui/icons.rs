@@ -213,7 +213,8 @@ pub fn draw(painter: &Painter, rect: Rect, g: Glyph, color: Color32) {
     match g {
         // Four tiles in a square, the first of them filled: a page of readings, of
         // which one is the one you came for. Distinct at 16px from `Processes`
-        // (three bars, all alike) and from `Details` (one framed grid).
+        // (a row with two branching under it) and from `Details` (three bulleted
+        // lines).
         Glyph::Summary => {
             let r = Rect::from_center_size(c, Vec2::splat(s * 1.72));
             let gap = s * 0.26;
@@ -238,18 +239,58 @@ pub fn draw(painter: &Painter, rect: Rect, g: Glyph, color: Color32) {
                 }
             }
         }
-        // Three stacked bars: a list of processes.
+        // A tree view: an expanded row with two indented under it. Which is what the
+        // Processes tab is and `Details` is not -- the same processes, listed flat --
+        // so the nesting is the whole difference between the two glyphs.
+        //
+        // The caret is doing the work, and it is why there is no trunk. Elbows down
+        // the left edge are how a tree view actually draws itself, but in a 16px box
+        // a top bar, a left spine and two stubs come out as a letter E, and no amount
+        // of moving the spine fixes it -- the silhouette is the problem, not the
+        // proportions. A caret has no such collision: nothing else in this rail is a
+        // triangle beside a row, it says "this row opens" on its own, and with the
+        // rows stepping right under it the reader is told the same thing twice.
         Glyph::Processes => {
-            for i in 0..3 {
-                let y = c.y + (i as f32 - 1.0) * s * 0.62;
+            let x0 = c.x - s * 0.85;
+            let right = c.x + s * 0.85;
+            let h = s * 0.26;
+            let rows = [c.y - s * 0.62, c.y, c.y + s * 0.62];
+            let bar = |x: f32, y: f32| {
                 painter.rect_filled(
-                    Rect::from_min_size(
-                        Pos2::new(c.x - s * 0.8, y - s * 0.14),
-                        Vec2::new(s * 1.6, s * 0.28),
-                    ),
+                    Rect::from_min_size(Pos2::new(x, y - h * 0.5), Vec2::new(right - x, h)),
                     egui::CornerRadius::same(1),
                     color,
                 );
+            };
+            // Pointing down, because the two rows under it are its children: a caret
+            // still pointing right would be a row that has not been opened yet.
+            let (cw, ch) = (s * 0.54, s * 0.34);
+            let cx = x0 + cw * 0.5;
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    Pos2::new(cx - cw * 0.5, rows[0] - ch * 0.5),
+                    Pos2::new(cx + cw * 0.5, rows[0] - ch * 0.5),
+                    Pos2::new(cx, rows[0] + ch * 0.5),
+                ],
+                color,
+                Stroke::NONE,
+            ));
+            bar(x0 + s * 0.62, rows[0]);
+            // A mark on each child: the caret says the first row opens, and a dot on
+            // the two under it says they are what came out of it. Their own rows are
+            // short as a consequence -- a caret, a dot and two bars is all a 16px box
+            // has room for -- and short is right anyway, since the row that matters
+            // here is the parent's.
+            //
+            // One indent level, and it is the parent's own left edge: the children's
+            // marks sit in the column the parent's row starts in, with the caret in
+            // the column to the left of it. Any deeper and a 16px glyph has spent
+            // half its width on white space.
+            let dot = s * 0.13;
+            for y in [rows[1], rows[2]] {
+                let x = x0 + s * 0.62;
+                painter.circle_filled(Pos2::new(x + dot, y), dot, color);
+                bar(x + dot * 2.8, y);
             }
         }
         // A rising trace inside axes.
@@ -272,17 +313,28 @@ pub fn draw(painter: &Painter, rect: Rect, g: Glyph, color: Color32) {
                 stroke,
             ));
         }
-        // A grid: rows and columns of detail.
+        // A bulleted list: three rows, each with a mark of its own and none of them
+        // under any other. This tab lists the same processes `Processes` does and
+        // draws them flat, so what separates the two glyphs is where the marks sit:
+        // three of them on one margin here, against a caret and two marks stepped in
+        // under it there. The dot is a shade taller than the bar it heads, or at 16px
+        // the two merge into one long line.
         Glyph::Details => {
-            let r = Rect::from_center_size(c, Vec2::splat(s * 1.7));
-            painter.rect_stroke(
-                r,
-                egui::CornerRadius::same(2),
-                Stroke::new(1.3, color),
-                egui::StrokeKind::Inside,
-            );
-            painter.hline(r.x_range(), c.y, Stroke::new(1.0, color));
-            painter.vline(c.x, r.y_range(), Stroke::new(1.0, color));
+            let dot = s * 0.17;
+            let left = c.x - s * 0.85;
+            let text = left + dot * 3.6;
+            for i in 0..3 {
+                let y = c.y + (i as f32 - 1.0) * s * 0.62;
+                painter.circle_filled(Pos2::new(left + dot, y), dot, color);
+                painter.rect_filled(
+                    Rect::from_min_size(
+                        Pos2::new(text, y - s * 0.14),
+                        Vec2::new(left + s * 1.7 - text, s * 0.28),
+                    ),
+                    egui::CornerRadius::same(1),
+                    color,
+                );
+            }
         }
         // Interlocking gear-ish rings.
         Glyph::Services => {

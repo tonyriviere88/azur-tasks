@@ -78,6 +78,10 @@ pub struct Proc {
     // --- rates (recomputed every tick) ----------------------------------
     /// Percent of total machine CPU capacity, 0..=100.
     pub cpu: f32,
+    /// The part of [`Self::cpu`] this process spent in kernel mode -- drivers, page
+    /// faults, the file and network stacks -- on the same scale and never more than
+    /// it. The per-process counterpart of [`CpuStats::kernel`].
+    pub cpu_kernel: f32,
     /// Disk bytes/sec (read + write + other transfers).
     pub disk_bps: f32,
     pub io_read_bps: f32,
@@ -183,6 +187,7 @@ impl Default for Proc {
             create_time: 0,
             name: Arc::from(""),
             cpu: 0.0,
+            cpu_kernel: 0.0,
             disk_bps: 0.0,
             io_read_bps: 0.0,
             io_write_bps: 0.0,
@@ -592,6 +597,12 @@ impl History {
 #[derive(Clone, Default)]
 pub struct Histories {
     pub cpu: History,
+    /// The share of the same wall clock that went to kernel mode, 0..=100.
+    ///
+    /// A *part of* [`Self::cpu`] rather than a series beside it: it is never the
+    /// larger of the two, which is why the graph draws it as a band inside the
+    /// total instead of a second line that could cross it.
+    pub cpu_kernel: History,
     pub per_core: Vec<History>,
     pub mem: History,
     /// Per-disk active time, 0..=100.

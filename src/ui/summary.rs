@@ -273,6 +273,10 @@ struct Metric<'a> {
     /// Borrowed for a resource the snapshot keeps a ring for; owned for the two
     /// that are sums across devices.
     hist: Cow<'a, History>,
+    /// A second trace over the first, where one figure is not the whole story:
+    /// kernel time inside the CPU total, upload beside download. `None` for the
+    /// resources that are one quantity.
+    overlay: Option<Trace<'a>>,
     max: f32,
     color: Color32,
     /// The Performance tab's view of the same resource — where a click goes.
@@ -284,6 +288,17 @@ struct Metric<'a> {
     /// half is written where the tooltip is built rather than at all five of the
     /// places a card is built.
     subject: Cow<'a, str>,
+}
+
+/// A card's second trace, on the same vertical scale as the first.
+struct Trace<'a> {
+    hist: Cow<'a, History>,
+    color: Color32,
+    /// Filled under the line, like the principal trace, when this trace is a
+    /// *share of* it — the shaded area then reads as "this much of that". A trace
+    /// that stands beside the first instead is a line alone, so the two stay
+    /// legible where they cross.
+    fill: bool,
 }
 
 fn metrics<'a>(snap: &'a Snapshot, t: &Theme) -> Vec<Metric<'a>> {
@@ -314,6 +329,15 @@ fn metrics<'a>(snap: &'a Snapshot, t: &Theme) -> Vec<Metric<'a>> {
         value_color: t.load_text(snap.cpu.total),
         detail,
         hist: Cow::Borrowed(&snap.hist.cpu),
+        // The share of the load that was spent in the kernel — drivers, page
+        // faults, the network stack — which is the Performance tab's "Kernel
+        // time" statistic and the band it draws inside the same trace. Part of
+        // the total rather than beside it, so it is filled.
+        overlay: Some(Trace {
+            hist: Cow::Borrowed(&snap.hist.cpu_kernel),
+            color: t.cpu_kernel(),
+            fill: true,
+        }),
         max: 100.0,
         color: t.cpu,
         res: Resource::Cpu,
@@ -323,17 +347,23 @@ fn metrics<'a>(snap: &'a Snapshot, t: &Theme) -> Vec<Metric<'a>> {
     // --- memory ------------------------------------------------------------
     let mut in_use = String::new();
     fmt::bytes(&mut in_use, snap.mem.in_use);
+    let mut committed = String::new();
+    fmt::bytes(&mut committed, snap.mem.committed);
     let mut total = String::new();
     fmt::bytes(&mut total, snap.mem.total);
-    let mut avail = String::new();
-    fmt::bytes(&mut avail, snap.mem.available);
     let pct = snap.mem.percent();
     out.push(Metric {
         label: Cow::Borrowed("Memory"),
         value: fmt::percent_sign_of(pct),
         value_color: t.load_text(pct),
-        detail: format!("{in_use} / {total} · {avail} free"),
+        // What is in RAM and what has been promised, in the Performance tab's own two
+        // words for them. Not the total: it is what the headline percentage is a
+        // percentage *of*, and the card already says it where it names the resource.
+        // Not what is free either -- that is the same number as the headline, read
+        // from the other end.
+        detail: format!("{in_use} in use · {committed} committed"),
         hist: Cow::Borrowed(&snap.hist.mem),
+        overlay: None,
         max: 100.0,
         color: t.mem,
         res: Resource::Memory,
@@ -365,6 +395,7 @@ fn metrics<'a>(snap: &'a Snapshot, t: &Theme) -> Vec<Metric<'a>> {
             // trace magnifies noise into a mountain range.
             max: graph::nice_ceil(hist.max().max(1024.0 * 1024.0)),
             hist: Cow::Owned(hist),
+            overlay: None,
             color: t.disk,
             res: Resource::Disk(busiest),
             subject: Cow::Borrowed(&snap.disks[busiest].name),
@@ -375,9 +406,13 @@ fn metrics<'a>(snap: &'a Snapshot, t: &Theme) -> Vec<Metric<'a>> {
     if !snap.nets.is_empty() {
         let recv: f32 = snap.nets.iter().map(|n| n.recv_bps).sum();
         let send: f32 = snap.nets.iter().map(|n| n.send_bps).sum();
-        // Both directions in one trace, for the same reason the disks are one: the
-        // card answers "is the link busy", and the split is on the line below it.
-        let hist = sum_hist(snap.hist.net_recv.iter().chain(snap.hist.net_send.iter()));
+        // One trace per direction, as on the Performance tab and in the same two
+        // colours: added together they would say a machine pulling 8 Mbps and one
+        // pushing 8 Mbps are the same event, and the shape of a download is not the
+        // shape of an upload. Summed across adapters, though — that is the
+        // aggregation this card does, and the one it can do honestly.
+        let recv_hist = sum_hist(snap.hist.net_recv.iter());
+        let send_hist = sum_hist(snap.hist.net_send.iter());
         let busiest = busiest(&snap.nets, |n| n.recv_bps + n.send_bps);
         let mut value = String::new();
         fmt::bits_per_sec(&mut value, recv + send);
@@ -394,9 +429,19 @@ fn metrics<'a>(snap: &'a Snapshot, t: &Theme) -> Vec<Metric<'a>> {
             } else {
                 "Not connected".to_owned()
             },
-            // 1 Mbps floor, matching the Performance tab's network graph.
-            max: graph::nice_ceil(hist.max().max(125_000.0)),
-            hist: Cow::Owned(hist),
+            // 1 Mbps floor, matching the Performance tab's network graph. Against
+            // the taller of the two directions, not their sum: they share the
+            // scale, and each is measured against the same ceiling.
+            max: graph::nice_ceil(recv_hist.max().max(send_hist.max()).max(125_000.0)),
+            hist: Cow::Owned(recv_hist),
+            // Line-only, and the accent the Performance tab gives the same series:
+            // send stands beside receive rather than inside it, and a second fill
+            // would hide whichever direction was quieter.
+            overlay: Some(Trace {
+                hist: Cow::Owned(send_hist),
+                color: t.accent.default,
+                fill: false,
+            }),
             color: t.net,
             res: Resource::Net(busiest),
             subject: Cow::Borrowed(&snap.nets[busiest].name),
@@ -452,6 +497,7 @@ fn metrics<'a>(snap: &'a Snapshot, t: &Theme) -> Vec<Metric<'a>> {
             value_color: t.load_text(g.utilization),
             detail,
             hist: Cow::Borrowed(snap.hist.gpu.get(i).unwrap_or(&NO_HISTORY)),
+            overlay: None,
             max: 100.0,
             color: t.gpu,
             res: Resource::Gpu(i),
@@ -546,7 +592,32 @@ fn paint_metric(ui: &Ui, t: &Theme, card: Rect, m: &Metric<'_>, hovered: bool) {
         ),
     );
     if plot.width() > 8.0 && plot.height() > 8.0 {
-        graph::sparkline(ui, t, plot, &m.hist, m.color, m.max.max(1.0), true);
+        // Slot 1 is seeded with slot 0 so the array is always whole; the slice
+        // handed over is one long unless this card has a second trace.
+        let mut series = [
+            graph::Series {
+                hist: &m.hist,
+                color: m.color,
+                fill: true,
+            },
+            graph::Series {
+                hist: &m.hist,
+                color: m.color,
+                fill: false,
+            },
+        ];
+        let n = match &m.overlay {
+            Some(o) => {
+                series[1] = graph::Series {
+                    hist: &o.hist,
+                    color: o.color,
+                    fill: o.fill,
+                };
+                2
+            }
+            None => 1,
+        };
+        graph::sparklines(ui, t, plot, &series[..n], m.max.max(1.0), true);
     }
 
     let detail_base = row_baseline(

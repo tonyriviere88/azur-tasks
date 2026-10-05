@@ -1,8 +1,12 @@
-//! The inspector: what the selected process is made of, in a panel under the list.
+//! The inspector: what the selected process is doing and what it is made of, in a
+//! panel under the list.
 //!
-//! Three tabs over one collector ([`crate::sys::inspect`]) -- modules, handles,
-//! threads -- and only the visible one is ever asked for, because the handle table
-//! costs more to read than the other two together.
+//! Four tabs. The first is drawn from the snapshot the panel is handed anyway -- the
+//! last minute of this process's CPU and memory -- and so asks nothing of anyone.
+//! The other three come from one collector ([`crate::sys::inspect`]) -- modules,
+//! handles, threads -- and only the visible one is ever asked for, because the handle
+//! table costs more to read than the other two together. Which is also why the cheap
+//! pane is the one the panel opens on.
 //!
 //! The panel is a *view of a request*, not a cache of a process. Every draw states
 //! the question it wants answered -- this pid, this list -- and paints the newest
@@ -10,10 +14,12 @@
 //! shown for a frame and then corrected; it is not shown at all.
 
 use super::fmt;
+use super::graph::{Graph, Scale, Series};
 use super::table::{Align, Column, RowPainter, Table};
 use super::theme::Theme;
 use super::Action;
 use crate::sys::inspect::{Inspection, Inspector, Kind, Rows};
+use crate::sys::snapshot::{History, Proc};
 use azur_egui_theme as azur;
 use azur_egui_theme::components::{
     menu_divider, ContextMenu, IconButton, MenuItem, Size, Tabs, Text, TextColor, TextVariant,
@@ -21,6 +27,7 @@ use azur_egui_theme::components::{
 };
 use azur_egui_theme::desktop;
 use azur_egui_theme::tokens::space;
+use azur_egui_theme::tokens::typography::{LINE_BODY, LINE_CAPTION};
 use egui::{Id, Layout, Ui};
 use std::sync::Arc;
 
@@ -81,8 +88,105 @@ const T_SWITCHES: u16 = 5;
 const T_CREATED: u16 = 6;
 const T_BASE_PRIO: u16 = 7;
 
-/// The three tabs, in the order they are shown.
-const TABS: [Kind; 3] = [Kind::Modules, Kind::Handles, Kind::Threads];
+/// What one tab of the strip shows.
+///
+/// The distinction that matters is not what is on screen but what it costs: a list
+/// has to be gone and read from the process, one kind at a time, while the activity
+/// graphs are already in hand.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Pane {
+    Activity,
+    List(Kind),
+}
+
+impl Pane {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Activity => "Activity",
+            Self::List(k) => k.label(),
+        }
+    }
+
+    /// The list this pane is of, or `None` for the one that is not a list.
+    fn kind(self) -> Option<Kind> {
+        match self {
+            Self::Activity => None,
+            Self::List(k) => Some(k),
+        }
+    }
+}
+
+/// The four tabs, in the order they are shown.
+const TABS: [Pane; 4] = [
+    Pane::Activity,
+    Pane::List(Kind::Modules),
+    Pane::List(Kind::Handles),
+    Pane::List(Kind::Threads),
+];
+
+/// The last minute of the process on screen: two rings, filled from the snapshots
+/// the panel is drawn against.
+///
+/// Neither in `Histories` beside the machine's own series nor in the sampler, and for
+/// the same reason: the sampler cannot know which of four hundred processes the
+/// reader is about to select, so it would have to keep a ring for every one of them
+/// -- which is the sort of cost this application is built not to pay. The rings
+/// belong to the *selection* instead, and start over when it moves.
+///
+/// So, said plainly because a graph must not imply more than it holds: this is the
+/// last minute the panel has been open on this process, not the last minute of the
+/// process. Select a row that has been running since Tuesday and it draws one sample
+/// and grows from there.
+#[derive(Default)]
+struct Activity {
+    /// Pid and creation time -- the pair that survives a recycled pid, which is
+    /// exactly the case where carrying the rings over would draw one process's
+    /// history under another's name.
+    key: Option<(u32, i64)>,
+    /// Which snapshot the newest sample came from. egui draws a frame in more than
+    /// one pass, and a sample per pass would run the ring at the frame rate.
+    sampled: u64,
+    /// Percent of the whole machine, as the list's own CPU column reads it.
+    cpu: History,
+    /// The kernel-mode part of it, drawn inside the same trace.
+    cpu_kernel: History,
+    /// Private working set in bytes -- its Memory column.
+    mem: History,
+    /// Private *commit* in bytes: the same memory counted as the process asked for
+    /// it rather than as it is resident, so never the smaller of the two.
+    commit: History,
+}
+
+impl Activity {
+    /// Take this snapshot's reading of the selected process, once per snapshot.
+    fn observe(&mut self, proc: Option<&Proc>, generation: u64) {
+        let Some(p) = proc else {
+            // Nothing selected. Forget whose the rings were, so that reselecting
+            // starts a fresh minute rather than resuming a stale one.
+            self.key = None;
+            return;
+        };
+        let key = (p.pid, p.create_time);
+        if self.key == Some(key) && self.sampled == generation {
+            return;
+        }
+        // Start over on a different process, and on a *gap* in the generations: the
+        // panel samples only while it is open, so rings carried across a close and a
+        // reopen would draw two separate minutes as one unbroken line.
+        if self.key != Some(key) || self.sampled + 1 != generation {
+            self.cpu = History::default();
+            self.cpu_kernel = History::default();
+            self.mem = History::default();
+            self.commit = History::default();
+        }
+        self.key = Some(key);
+        self.sampled = generation;
+        self.cpu.push(p.cpu);
+        self.cpu_kernel.push(p.cpu_kernel);
+        self.mem.push(p.private_ws as f32);
+        self.commit.push(p.commit as f32);
+    }
+}
 
 /// What the reader did to the strip this frame.
 #[derive(Default)]
@@ -94,9 +198,13 @@ struct Strip {
 pub struct InspectorPanel {
     /// Index into [`TABS`].
     tab: usize,
-    /// One table per tab, so column widths and the sort stay put per list.
+    /// One table per *list*, indexed by [`Kind`] rather than by tab, so that column
+    /// widths and the sort stay put per list and none of them moves if a tab is ever
+    /// inserted to the left of it.
     tables: [Table; 3],
     selected: [Option<usize>; 3],
+    /// The graphs' rings, kept for whichever process is selected.
+    activity: Activity,
     inspector: Inspector,
     /// The newest answer that matched what we were drawing. Kept so switching tabs
     /// or ticking the sampler does not blank the panel while the worker catches up.
@@ -166,6 +274,7 @@ impl InspectorPanel {
                 ),
             ],
             selected: [None; 3],
+            activity: Activity::default(),
             inspector: Inspector::start(move || ctx.request_repaint()),
             shown: None,
             order: Vec::new(),
@@ -186,8 +295,8 @@ impl InspectorPanel {
         panel
     }
 
-    /// The list currently on screen.
-    fn kind(&self) -> Kind {
+    /// The pane currently on screen.
+    fn pane(&self) -> Pane {
         TABS[self.tab.min(TABS.len() - 1)]
     }
 
@@ -204,8 +313,7 @@ impl InspectorPanel {
         &mut self,
         ui: &mut Ui,
         t: &Theme,
-        pid: Option<u32>,
-        name: Option<&str>,
+        proc: Option<&Proc>,
         generation: u64,
         action: &mut Option<Action>,
     ) -> bool {
@@ -222,23 +330,44 @@ impl InspectorPanel {
         // for.
         ui.set_min_height(ui.available_height());
 
-        let kind = self.kind();
+        // Sampled before anything is drawn, and whichever pane is up: the rings fill
+        // while the *panel* is open, so a reader who has spent a minute in the thread
+        // list has a minute of graph waiting when they come back to the first tab.
+        self.activity.observe(proc, generation);
+
+        let pane = self.pane();
         let Strip {
             tab_changed,
             closed,
-        } = self.strip(ui, t, pid, name);
+        } = self.strip(ui, t, proc);
         if tab_changed {
             // A tab change is a different question; the old answer is not it.
             self.shown = None;
             self.built = None;
         }
-        let kind = if tab_changed { self.kind() } else { kind };
+        let pane = if tab_changed { self.pane() } else { pane };
 
-        let Some(pid) = pid else {
+        let Some(proc) = proc else {
             self.shown = None;
-            self.note(ui, t, "Select a process to see what it is made of");
+            self.note(
+                ui,
+                t,
+                match pane {
+                    Pane::Activity => "Select a process to see what it is doing",
+                    Pane::List(_) => "Select a process to see what it is made of",
+                },
+            );
             return closed;
         };
+
+        // Nothing to ask anyone: the graphs are of the snapshot the caller is already
+        // holding. This is also the pane the panel opens on, so opening it now costs
+        // a handle table's worth of work less than it used to.
+        let Some(kind) = pane.kind() else {
+            self.activity_pane(ui, t, proc);
+            return closed;
+        };
+        let pid = proc.pid;
 
         // Ask, when the question has changed.
         if self.asked != Some((pid, kind, generation)) {
@@ -289,7 +418,7 @@ impl InspectorPanel {
     /// what the caption's baseline is taken from. Three controls each centred in the
     /// full strip instead would put the labels, the glyph and the caption on three
     /// different lines, none of them agreeing to within a point.
-    fn strip(&mut self, ui: &mut Ui, t: &Theme, pid: Option<u32>, name: Option<&str>) -> Strip {
+    fn strip(&mut self, ui: &mut Ui, t: &Theme, proc: Option<&Proc>) -> Strip {
         let mut out = Strip::default();
         let full = ui.max_rect();
         let rect = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), strip_h()));
@@ -302,9 +431,12 @@ impl InspectorPanel {
         // handles" is the answer to a question about a leak on its own.
         let labels: Vec<String> = TABS
             .iter()
-            .map(|k| match self.shown.as_ref().filter(|s| s.kind() == *k) {
-                Some(s) => format!("{} ({})", k.label(), s.rows.len()),
-                None => k.label().to_owned(),
+            .map(|p| match p.kind() {
+                Some(k) => match self.shown.as_ref().filter(|s| s.kind() == k) {
+                    Some(s) => format!("{} ({})", p.label(), s.rows.len()),
+                    None => p.label().to_owned(),
+                },
+                None => p.label().to_owned(),
             })
             .collect();
 
@@ -347,9 +479,9 @@ impl InspectorPanel {
         let tabs_w =
             azur::components::tabs_width(ui.painter(), t, labels.iter().map(String::as_str), 0);
         let mut caption_left = right.min_rect().left();
-        if let (Some(pid), Some(name)) = (pid, name) {
+        if let Some(p) = proc {
             let galley = ui.painter().layout_no_wrap(
-                format!("{}  ({pid})", fmt::elide(name, 44)),
+                format!("{}  ({})", fmt::elide(&p.name, 44), p.pid),
                 t.fonts.caption.clone(),
                 t.text.secondary,
             );
@@ -404,6 +536,109 @@ impl InspectorPanel {
         out
     }
 
+    /// The Activity pane: the last minute of this process, CPU over memory.
+    fn activity_pane(&self, ui: &mut Ui, t: &Theme, proc: &Proc) {
+        let rect = ui.available_rect_before_wrap();
+        ui.painter()
+            .rect_filled(rect, desktop::structural_radius(), t.bg.layer);
+        let body = rect.shrink2(egui::vec2(space::S3, space::S2));
+        if body.height() < LINE_BODY || body.width() < 24.0 {
+            return;
+        }
+        // One graph over the other rather than side by side: this panel is a wide,
+        // short strip, and two graphs beside each other would each be half as wide as
+        // the minute they are drawing.
+        let half = (body.height() - space::S3) / 2.0;
+
+        let mut value = String::new();
+        fmt::percent(&mut value, proc.cpu);
+        value.push_str(" %");
+        let mut kernel = String::new();
+        fmt::percent(&mut kernel, proc.cpu_kernel);
+        kernel.push_str(" % kernel");
+        activity_graph(
+            ui,
+            t,
+            ActivityGraph {
+                rect: egui::Rect::from_min_size(body.min, egui::vec2(body.width(), half)),
+                label: "CPU",
+                value: &value,
+                // The kernel figure in the colour of its own band: it is the legend
+                // for the darker area inside the trace as much as it is a reading,
+                // and a legend that is also the number costs no room at all.
+                aside: Some((&kernel, t.cpu_kernel())),
+                series: &[
+                    Series {
+                        hist: &self.activity.cpu,
+                        color: t.cpu,
+                        fill: true,
+                    },
+                    // Inside the total, exactly as the machine's own CPU graph draws
+                    // the same distinction.
+                    Series {
+                        hist: &self.activity.cpu_kernel,
+                        color: t.cpu_kernel(),
+                        fill: true,
+                    },
+                ],
+                // A tenth of the machine, so that a process holding one thread of
+                // twenty-four has something to stand against.
+                scale: Scale::Auto { floor: 10.0 },
+            },
+            |max| {
+                let mut s = String::new();
+                fmt::percent_sign(&mut s, max);
+                s
+            },
+        );
+
+        let mut value = String::new();
+        fmt::bytes(&mut value, proc.private_ws);
+        let mut committed = String::new();
+        fmt::bytes(&mut committed, proc.commit);
+        committed.push_str(" committed");
+        activity_graph(
+            ui,
+            t,
+            ActivityGraph {
+                rect: egui::Rect::from_min_size(
+                    egui::pos2(body.left(), body.bottom() - half),
+                    egui::vec2(body.width(), half),
+                ),
+                label: "Memory",
+                value: &value,
+                aside: Some((&committed, t.mem_commit())),
+                series: &[
+                    // Commit first, because it is the *outer* of the two: what the
+                    // process asked for, whether or not any of it is in RAM. The
+                    // working set is drawn inside it, which is the same nesting the
+                    // CPU graph above draws for its own pair.
+                    Series {
+                        hist: &self.activity.commit,
+                        color: t.mem_commit(),
+                        fill: true,
+                    },
+                    Series {
+                        hist: &self.activity.mem,
+                        color: t.mem,
+                        fill: true,
+                    },
+                ],
+                // 16 MB, for the reason the disk's rate graph has a floor of its own:
+                // a still series against a ceiling of its own noise is a mountain
+                // range.
+                scale: Scale::Auto {
+                    floor: 16.0 * 1024.0 * 1024.0,
+                },
+            },
+            |max| {
+                let mut s = String::new();
+                fmt::bytes(&mut s, max as u64);
+                s
+            },
+        );
+    }
+
     /// One line of explanation, centred in the space the rows would have used.
     fn note(&self, ui: &mut Ui, t: &Theme, text: &str) {
         let rect = ui.available_rect_before_wrap();
@@ -424,7 +659,7 @@ impl InspectorPanel {
 
     /// Sort the rows for the active tab, when the answer or the sort has moved.
     fn rebuild_order(&mut self, shown: &Arc<Inspection>) {
-        let table = &self.tables[self.tab];
+        let table = &self.tables[shown.kind() as usize];
         let stamp = (Arc::as_ptr(shown) as usize, table.sort_by, table.sort_desc);
         if self.built == Some(stamp) {
             return;
@@ -484,7 +719,10 @@ impl InspectorPanel {
         shown: &Arc<Inspection>,
         action: &mut Option<Action>,
     ) {
-        let tab = self.tab;
+        // By list rather than by tab: the tables, the selections and the ids egui
+        // keeps the column widths under all belong to a *list*, and a tab inserted to
+        // the left of them must not shuffle any of it.
+        let tab = shown.kind() as usize;
         let id = Id::new(("inspector", tab));
         if self.tables[tab].header(ui, t, id) {
             // A new sort, which `rebuild_order` picks up on the next pass; the rows
@@ -591,6 +829,83 @@ impl InspectorPanel {
                 }
             }
         });
+    }
+}
+
+/// One of the Activity pane's two graphs.
+struct ActivityGraph<'a> {
+    rect: egui::Rect,
+    label: &'a str,
+    /// The live reading, in the units the heading should show it in.
+    value: &'a str,
+    /// A second reading on the same line, drawn in its series' own colour just left
+    /// of the first -- the CPU graph's kernel share, which is a legend for the band
+    /// inside the trace and a figure in its own right at the same time.
+    aside: Option<(&'a str, egui::Color32)>,
+    /// Drawn in order, so a series nested inside another comes second.
+    series: &'a [Series<'a>],
+    scale: Scale,
+}
+
+/// Paint one: a heading line carrying the live figures, and the last minute under it.
+///
+/// `axis` turns the resolved ceiling into its label, because only the caller knows
+/// whether that number is a percentage or a size. Both graphs *autoscale*, where
+/// every percentage on the Performance tab is drawn against a fixed 0..100: one
+/// process is a fraction of the machine -- a thread of twenty-four pegged is 4% --
+/// and on the machine's scale almost every process is a flat line along the floor.
+/// The ceiling is labelled, which is what keeps an autoscaled graph honest.
+fn activity_graph(ui: &Ui, t: &Theme, g: ActivityGraph<'_>, axis: impl Fn(f32) -> String) {
+    let ActivityGraph {
+        rect,
+        label,
+        value,
+        aside,
+        series,
+        scale,
+    } = g;
+    let p = ui.painter();
+    // A caption naming the series and the current reading in body, on the one
+    // baseline the reading's font gives: the arrangement every card in this window
+    // uses for the same pair.
+    let baseline = azur::components::row_baseline(p, &t.fonts.body, rect.top(), LINE_BODY);
+    let v = p.layout_no_wrap(value.to_owned(), t.fonts.body.clone(), t.text.primary);
+    let l = p.layout_no_wrap(label.to_owned(), t.fonts.caption.clone(), t.text.secondary);
+    let label_w = l.size().x;
+    let value_x = rect.right() - v.size().x;
+    azur::components::galley_on_baseline(p, rect.left(), baseline, l);
+    azur::components::galley_on_baseline(p, value_x, baseline, v);
+    if let Some((text, color)) = aside {
+        // In caption, on the same baseline: the total is the principal figure on this
+        // line, and its part should not compete with it for the eye.
+        let a = p.layout_no_wrap(text.to_owned(), t.fonts.caption.clone(), color);
+        let x = value_x - space::S3 - a.size().x;
+        // Dropped rather than overlapped on a narrow panel, the way the strip above
+        // drops the process name it cannot fit.
+        if x > rect.left() + label_w + space::S3 {
+            azur::components::galley_on_baseline(p, x, baseline, a);
+        }
+    }
+
+    let plot = egui::Rect::from_min_max(
+        egui::pos2(rect.left(), rect.top() + LINE_BODY + space::S1),
+        rect.max,
+    );
+    // Nothing worth drawing in a sliver: the panel can be dragged down to two rows,
+    // and a reader who has done that wants the figures, not a hatch.
+    if plot.height() < 12.0 || plot.width() < 24.0 {
+        return;
+    }
+    let mut graph = Graph::new(series, scale);
+    // Five grid rows in a 40-point graph is not a grid, it is a hatch.
+    if plot.height() < 70.0 {
+        graph.grid_rows = 2;
+    }
+    let max = graph.paint(ui, t, plot);
+    // The corner labels want a line of their own at each end of the plot; printed
+    // over anything shorter they hide the trace they annotate.
+    if plot.height() >= LINE_CAPTION * 2.0 + 8.0 {
+        super::performance::axis_labels(ui, t, plot, &axis(max), "0", "60 seconds");
     }
 }
 
@@ -758,6 +1073,23 @@ fn denial(kind: Kind) -> &'static str {
 mod tests {
     use super::*;
 
+    /// The panel wants a process; the lists only ever read its pid, and the graphs
+    /// its two figures. Everything else is what `Proc`'s test-only `Default` is for.
+    fn fixture(pid: u32) -> Proc {
+        Proc {
+            pid,
+            name: "aztm-test.exe".into(),
+            cpu: 1.5,
+            // A part of the CPU figure above, so the band inside the trace has some
+            // height to it and the mesh count below is counting something.
+            cpu_kernel: 0.6,
+            private_ws: 40 * 1024 * 1024,
+            // Larger than the working set, as private commit always is.
+            commit: 72 * 1024 * 1024,
+            ..Default::default()
+        }
+    }
+
     /// Drive the panel headlessly against this very process, one tab at a time.
     ///
     /// The collector has its own tests against the kernel; this is the other half --
@@ -771,9 +1103,14 @@ mod tests {
         let t = Theme::dark();
         let mut panel = InspectorPanel::new(&ctx);
         panel.tab = tab;
-        assert_eq!(panel.kind(), kind, "the tab index and the list disagree");
+        assert_eq!(
+            panel.pane().kind(),
+            Some(kind),
+            "the tab index and the list disagree"
+        );
 
-        let pid = std::process::id();
+        let proc = fixture(std::process::id());
+        let pid = proc.pid;
         let mut action = None;
         // The worker answers on its own thread, so the pass is repeated until the
         // answer lands. Ten tries at 50 ms is a long time for three system calls and
@@ -783,14 +1120,7 @@ mod tests {
                 // A real rect, or the table would have nothing to lay out in.
                 let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 300.0));
                 let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
-                panel.ui(
-                    &mut ui,
-                    &t,
-                    Some(pid),
-                    Some("aztm-test.exe"),
-                    i,
-                    &mut action,
-                );
+                panel.ui(&mut ui, &t, Some(&proc), i, &mut action);
             });
             if panel.shown.is_some() {
                 // One more pass with the answer in hand: the first pass that has it
@@ -799,14 +1129,7 @@ mod tests {
                     let rect =
                         egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 300.0));
                     let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
-                    panel.ui(
-                        &mut ui,
-                        &t,
-                        Some(pid),
-                        Some("aztm-test.exe"),
-                        i,
-                        &mut action,
-                    );
+                    panel.ui(&mut ui, &t, Some(&proc), i, &mut action);
                 });
                 break;
             }
@@ -835,7 +1158,7 @@ mod tests {
 
     #[test]
     fn paints_the_modules_of_this_process() {
-        assert!(paints(Kind::Modules, 0) > 2, "a process with no DLLs");
+        assert!(paints(Kind::Modules, 1) > 2, "a process with no DLLs");
     }
 
     /// "Copy all information" is the tooltip's content, and both come out of
@@ -848,7 +1171,10 @@ mod tests {
         super::super::theme::install(&ctx);
         let t = Theme::dark();
         let mut panel = InspectorPanel::new(&ctx);
-        let pid = std::process::id();
+        // Named, because the panel opens on the graphs now, and they have no rows to
+        // read back.
+        panel.tab = 1;
+        let proc = fixture(std::process::id());
         let mut action = None;
 
         // A module row, which is the tab whose columns all always have a value.
@@ -856,14 +1182,7 @@ mod tests {
             let _ = ctx.run_ui(Default::default(), |ui| {
                 let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 300.0));
                 let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
-                panel.ui(
-                    &mut ui,
-                    &t,
-                    Some(pid),
-                    Some("aztm-test.exe"),
-                    i,
-                    &mut action,
-                );
+                panel.ui(&mut ui, &t, Some(&proc), i, &mut action);
             });
             if panel.shown.is_some() {
                 break;
@@ -901,12 +1220,12 @@ mod tests {
 
     #[test]
     fn paints_the_handles_of_this_process() {
-        assert!(paints(Kind::Handles, 1) > 0);
+        assert!(paints(Kind::Handles, 2) > 0);
     }
 
     #[test]
     fn paints_the_threads_of_this_process() {
-        assert!(paints(Kind::Threads, 2) > 0);
+        assert!(paints(Kind::Threads, 3) > 0);
     }
 
     /// Every note the panel can show has to *fit* the panel: these are sentences, and
@@ -921,6 +1240,7 @@ mod tests {
             denial(Kind::Handles),
             denial(Kind::Threads),
             "Select a process to see what it is made of",
+            "Select a process to see what it is doing",
             "Reading…",
         ];
         // A panel as wide as a maximised window, and one as narrow as it can be
@@ -957,22 +1277,17 @@ mod tests {
         super::super::theme::install(&ctx);
         let t = Theme::dark();
         let mut panel = InspectorPanel::new(&ctx);
+        // Any list will do; the pane the panel opens on has no rows to forget.
+        panel.tab = 1;
         let mut action = None;
 
         // A pass with a process, waited out until it has rows.
-        let pid = std::process::id();
+        let proc = fixture(std::process::id());
         for i in 0..10 {
             let _ = ctx.run_ui(Default::default(), |ui| {
                 let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 300.0));
                 let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
-                panel.ui(
-                    &mut ui,
-                    &t,
-                    Some(pid),
-                    Some("aztm-test.exe"),
-                    i,
-                    &mut action,
-                );
+                panel.ui(&mut ui, &t, Some(&proc), i, &mut action);
             });
             if panel.shown.is_some() {
                 break;
@@ -988,11 +1303,106 @@ mod tests {
         let _ = ctx.run_ui(Default::default(), |ui| {
             let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 300.0));
             let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
-            panel.ui(&mut ui, &t, None, None, 99, &mut action);
+            panel.ui(&mut ui, &t, None, 99, &mut action);
         });
         assert!(
             panel.shown.is_none(),
             "the panel kept a dead selection's rows"
         );
+    }
+
+    /// The first tab draws from the snapshot alone, and has to do it without a
+    /// request going anywhere: costing nothing to open is the whole reason it is the
+    /// pane the panel opens on.
+    #[test]
+    fn graphs_the_selected_process_without_asking_the_collector() {
+        let ctx = egui::Context::default();
+        super::super::theme::install(&ctx);
+        let t = Theme::dark();
+        let mut panel = InspectorPanel::new(&ctx);
+        let proc = fixture(std::process::id());
+        let mut action = None;
+
+        assert_eq!(panel.pane(), Pane::Activity, "the panel opens on a list");
+
+        // Three consecutive snapshots, because two samples are the fewest a line can
+        // be drawn through: a pane that had only ever seen one would paint no trace
+        // at all and still pass every other assertion here.
+        let mut out = None;
+        for g in 1..=3 {
+            out = Some(ctx.run_ui(Default::default(), |ui| {
+                let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 300.0));
+                let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+                panel.ui(&mut ui, &t, Some(&proc), g, &mut action);
+            }));
+        }
+        let out = out.unwrap();
+
+        assert!(
+            panel.shown.is_none(),
+            "the graphs went and asked the collector for a list"
+        );
+        assert_eq!(panel.activity.cpu.len(), 3);
+        assert_eq!(panel.activity.mem.len(), 3);
+
+        // One filled trace per graph -- the fill is a mesh, and it is the only mesh
+        // either of them draws, so this is the assertion that the traces are there
+        // and not just the frames around them.
+        let meshes = out
+            .shapes
+            .iter()
+            .filter(|s| matches!(s.shape, egui::Shape::Mesh(_)))
+            .count();
+        assert_eq!(
+            meshes, 4,
+            "two filled traces per graph: a total and the part drawn inside it"
+        );
+        // A heading and a reading each, and three corner labels per plot.
+        let texts = out
+            .shapes
+            .iter()
+            .filter(|s| matches!(s.shape, egui::Shape::Text(_)))
+            .count();
+        assert!(
+            texts >= 10,
+            "{texts} labels drawn: both headings and both sets of axis labels expected"
+        );
+    }
+
+    /// The rings belong to the *selection*, and this is the promise they make: a
+    /// different process, or a gap in the snapshots while the panel was shut, starts
+    /// a new minute rather than continuing somebody else's.
+    #[test]
+    fn the_rings_follow_the_selection() {
+        let mut a = Activity::default();
+        let one = Proc {
+            pid: 10,
+            create_time: 1,
+            cpu: 5.0,
+            cpu_kernel: 1.0,
+            ..Default::default()
+        };
+
+        a.observe(Some(&one), 1);
+        a.observe(Some(&one), 2);
+        assert_eq!(a.cpu.len(), 2);
+        // The same snapshot again: egui draws one frame in several passes, and every
+        // one of them comes through here.
+        a.observe(Some(&one), 2);
+        assert_eq!(a.cpu.len(), 2, "a repeated pass pushed a second sample");
+
+        // A recycled pid is a different process, and the creation time is the only
+        // thing that says so.
+        let two = Proc {
+            pid: 10,
+            create_time: 2,
+            ..Default::default()
+        };
+        a.observe(Some(&two), 3);
+        assert_eq!(a.cpu.len(), 1, "one process's history ran into another's");
+
+        // A gap: the panel was shut for half a minute while the sampler ran on.
+        a.observe(Some(&two), 40);
+        assert_eq!(a.cpu.len(), 1, "two separate minutes drawn as one line");
     }
 }

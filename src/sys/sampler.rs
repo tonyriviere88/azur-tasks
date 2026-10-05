@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 struct Prev {
     create_time: i64,
     cpu_time: u64,
+    kernel_time: u64,
     io_read: u64,
     io_write: u64,
     io_other: u64,
@@ -427,7 +428,8 @@ impl Sampler {
             let key = ProcKey { pid, create_time };
             self.live.insert(key);
 
-            let cpu_time = (info.KernelTime as u64).wrapping_add(info.UserTime as u64);
+            let kernel_time = info.KernelTime as u64;
+            let cpu_time = kernel_time.wrapping_add(info.UserTime as u64);
             let io_read = info.ReadTransferCount as u64;
             let io_write = info.WriteTransferCount as u64;
             let io_other = info.OtherTransferCount as u64;
@@ -435,6 +437,7 @@ impl Sampler {
             // Rates, but only against a matching previous sample: a recycled PID
             // must not inherit the old process's counters.
             let mut cpu = 0.0f32;
+            let mut cpu_kernel = 0.0f32;
             let mut io_read_bps = 0.0f32;
             let mut io_write_bps = 0.0f32;
             let mut disk_bps = 0.0f32;
@@ -443,8 +446,13 @@ impl Sampler {
             if let Some(p) = self.prev.get(&pid).copied() {
                 if p.create_time == create_time && dt > 0.0 {
                     let d_cpu = cpu_time.saturating_sub(p.cpu_time) as f64;
+                    let d_kernel = kernel_time.saturating_sub(p.kernel_time) as f64;
                     if cpu_capacity_100ns > 0.0 {
                         cpu = ((d_cpu / cpu_capacity_100ns) * 100.0).clamp(0.0, 100.0) as f32;
+                        // Against the same capacity, so that the two are one figure
+                        // and its part rather than two percentages of two things.
+                        cpu_kernel =
+                            ((d_kernel / cpu_capacity_100ns) * 100.0).clamp(0.0, 100.0) as f32;
                     }
                     let dr = io_read.saturating_sub(p.io_read) as f64;
                     let dw = io_write.saturating_sub(p.io_write) as f64;
@@ -462,6 +470,7 @@ impl Sampler {
                 Prev {
                     create_time,
                     cpu_time,
+                    kernel_time,
                     io_read,
                     io_write,
                     io_other,
@@ -513,6 +522,7 @@ impl Sampler {
                 create_time,
                 name,
                 cpu,
+                cpu_kernel,
                 disk_bps,
                 io_read_bps,
                 io_write_bps,
@@ -747,6 +757,7 @@ impl Sampler {
 
     fn push_history(&mut self, out: &Snapshot) {
         self.hist.cpu.push(out.cpu.total);
+        self.hist.cpu_kernel.push(out.cpu.kernel);
         self.hist.mem.push(out.mem.percent());
 
         resize_hist(&mut self.hist.per_core, out.cpu.per_core.len());

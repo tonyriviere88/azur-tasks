@@ -4,9 +4,10 @@
 use super::fmt;
 use super::graph::{self, Graph, Scale, Series};
 use super::theme::Theme;
-use azur_egui_theme::components::Tabs;
+use azur_egui_theme::components::{galley_on_baseline, ink_baseline, Tabs};
 use azur_egui_theme::desktop;
 use azur_egui_theme::tokens::space;
+use azur_egui_theme::tokens::typography::LINE_CAPTION;
 use crate::sys::snapshot::{History, Snapshot};
 use egui::{Align2, Color32, CornerRadius, Pos2, Rect, Sense, Ui, Vec2};
 
@@ -308,13 +309,47 @@ impl PerfTab {
                 }
             }
         } else {
-            let series = [Series {
-                hist: &snap.hist.cpu,
-                color: t.cpu,
-                fill: true,
-            }];
+            let series = [
+                Series {
+                    hist: &snap.hist.cpu,
+                    color: t.cpu,
+                    fill: true,
+                },
+                // Kernel time is a share *of* the line above it rather than a
+                // second quantity, and never the larger of the two -- so it is a
+                // filled band inside the total, the way Task Manager draws it,
+                // and not a line that a reader would try to read against it. The
+                // two washes stack where they overlap, which is what makes the
+                // kernel's share of a busy minute visible at all.
+                Series {
+                    hist: &snap.hist.cpu_kernel,
+                    color: t.cpu_kernel(),
+                    fill: true,
+                },
+            ];
             Graph::new(&series, Scale::Percent).paint(ui, t, graph_rect);
             axis_labels(ui, t, graph_rect, "100%", "0%", "60 seconds");
+            // Top-right, the only corner the axis labels leave free -- the same
+            // corner, for the same reason, as the network graph's legend.
+            let ly = graph_rect.top() + 4.0;
+            let kernel_w = legend_width(ui, t, "Kernel");
+            let total_w = legend_width(ui, t, "Total");
+            let gap = 14.0;
+            let right = graph_rect.right() - 8.0;
+            legend_dot(
+                ui,
+                t,
+                Pos2::new(right - kernel_w, ly),
+                t.cpu_kernel(),
+                "Kernel",
+            );
+            legend_dot(
+                ui,
+                t,
+                Pos2::new(right - kernel_w - gap - total_w, ly),
+                t.cpu,
+                "Total",
+            );
         }
 
         // --- statistics ---------------------------------------------------
@@ -755,7 +790,14 @@ fn title(ui: &Ui, t: &Theme, rect: Rect, name: &str, subtitle: &str) -> f32 {
 }
 
 /// Corner labels around a graph, matching Task Manager's axis annotations.
-fn axis_labels(ui: &Ui, t: &Theme, rect: Rect, top: &str, bottom: &str, span: &str) {
+pub(super) fn axis_labels(
+    ui: &Ui,
+    t: &Theme,
+    rect: Rect,
+    top: &str,
+    bottom: &str,
+    span: &str,
+) {
     let p = ui.painter();
     p.text(
         rect.left_top() + Vec2::new(4.0, 2.0),
@@ -863,19 +905,30 @@ fn legend_width(ui: &Ui, t: &Theme, label: &str) -> f32 {
         .x
 }
 
+/// One legend entry — a dash in the series colour, then the series name — with
+/// `pos` at the top left of the line it occupies.
+///
+/// The dash is a glyph on the label's line, so it is levelled with the label's
+/// *ink* rather than with its line box: this is what `ink_baseline` is for, and
+/// topping the two boxes independently, as this did, left the dash floating above
+/// the x-height it is meant to run through.
 fn legend_dot(ui: &Ui, t: &Theme, pos: Pos2, color: Color32, label: &str) {
     let p = ui.painter();
+    let baseline = ink_baseline(p, &t.fonts.caption, pos.y, LINE_CAPTION);
+    // The middle of that ink band, which is where the dash's own middle goes: the
+    // band runs one ink-ascent up from the baseline, so its centre is the centre of
+    // the line box. Rounded, so a 3px rule lands on whole pixels and stays crisp.
+    let mid = (pos.y + LINE_CAPTION * 0.5 - 1.5).round();
     p.rect_filled(
-        Rect::from_min_size(pos + Vec2::new(0.0, 4.0), Vec2::new(9.0, 3.0)),
+        Rect::from_min_size(Pos2::new(pos.x, mid), Vec2::new(9.0, 3.0)),
         CornerRadius::same(1),
         color,
     );
-    p.text(
-        pos + Vec2::new(14.0, 0.0),
-        Align2::LEFT_TOP,
-        label,
-        t.fonts.caption.clone(),
-        t.text.secondary,
+    galley_on_baseline(
+        p,
+        pos.x + 14.0,
+        baseline,
+        p.layout_no_wrap(label.to_owned(), t.fonts.caption.clone(), t.text.secondary),
     );
 }
 

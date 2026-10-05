@@ -13,7 +13,7 @@
 //! one fact that a third process-listing tab would have had to find.
 
 use super::App;
-use crate::sys::snapshot::Snapshot;
+use crate::sys::snapshot::{Proc, Snapshot};
 use crate::ui::icons;
 use crate::ui::{details, processes, services, startup};
 use azur_egui_theme as azur;
@@ -138,21 +138,21 @@ impl App {
 
     /// The process the inspector is about: whatever the active list has selected.
     ///
-    /// The name comes along because the panel is docked *under* the list and has to
-    /// say which row it belongs to -- with the keyboard moving the selection, the
-    /// two can otherwise be read as unrelated.
-    pub(super) fn inspected(&self, snap: &Snapshot) -> (Option<u32>, Option<String>) {
+    /// The whole row, not just its pid: the panel is docked *under* the list and has
+    /// to say which row it belongs to -- with the keyboard moving the selection, the
+    /// two can otherwise be read as unrelated -- and its first tab graphs the same
+    /// CPU and memory figures the row itself is showing.
+    ///
+    /// Borrowed from the snapshot rather than copied out of it. The snapshot is held
+    /// for the whole frame and outlives the panel that reads it, so nothing here has
+    /// to be cloned to be looked at.
+    pub(super) fn inspected<'s>(&self, snap: &'s Snapshot) -> Option<&'s Proc> {
         let key = match self.tab {
             Tab::Processes => self.processes.list.selected,
             Tab::Details => self.details.list.selected,
             _ => None,
         };
-        match key.and_then(|k| snap.find_by_key(k)) {
-            Some(i) => (
-                Some(snap.procs[i].pid),
-                Some(snap.procs[i].name.to_string()),
-            ),
-            None => (None, None),
-        }
+        key.and_then(|k| snap.find_by_key(k))
+            .map(|i| &snap.procs[i])
     }
 }

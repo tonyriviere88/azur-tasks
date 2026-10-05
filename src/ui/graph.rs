@@ -193,21 +193,50 @@ pub fn sparkline(
     max: f32,
     border: bool,
 ) {
+    let series = [Series {
+        hist,
+        color,
+        fill: true,
+    }];
+    sparklines(ui, t, rect, &series, max, border);
+}
+
+/// The same graph with more than one trace on it, for a Summary card whose
+/// resource is two quantities: kernel time inside the CPU total, send beside
+/// receive.
+///
+/// No grid and no axis labels -- that is the whole difference from [`Graph`], and
+/// the reason a card is not one: at 90x40 a grid is noise, and the figure the axis
+/// would carry is already the headline above the trace. Drawn in the order given,
+/// so the trace that should read as *on top* comes last.
+pub fn sparklines(
+    ui: &Ui,
+    t: &Theme,
+    rect: Rect,
+    series: &[Series<'_>],
+    max: f32,
+    border: bool,
+) {
     let painter = ui.painter().with_clip_rect(rect);
     painter.rect_filled(rect, CornerRadius::ZERO, t.bg.canvas);
 
-    let n = hist.len();
-    if n >= 2 {
+    for s in series {
+        let n = s.hist.len();
+        if n < 2 {
+            continue;
+        }
         let dx = rect.width() / (HISTORY_LEN - 1) as f32;
         let x_of = |i: usize| rect.right() - (n - 1 - i) as f32 * dx;
         let y_of = |v: f32| rect.bottom() - (v / max).clamp(0.0, 1.0) * rect.height();
 
         let mut line: Vec<Pos2> = Vec::with_capacity(n);
-        for (i, v) in hist.iter().enumerate() {
+        for (i, v) in s.hist.iter().enumerate() {
             line.push(Pos2::new(x_of(i), y_of(v)));
         }
-        fill_under(&painter, &line, rect.bottom(), fill_of(color));
-        painter.add(egui::Shape::line(line, Stroke::new(1.2, color)));
+        if s.fill {
+            fill_under(&painter, &line, rect.bottom(), fill_of(s.color));
+        }
+        painter.add(egui::Shape::line(line, Stroke::new(1.2, s.color)));
     }
 
     if border {
