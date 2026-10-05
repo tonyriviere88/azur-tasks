@@ -38,6 +38,24 @@ pub fn attach_parent_console() {
     }
 }
 
+/// Whether a Windows key is held.
+///
+/// Asked of the keyboard rather than of the frame, because egui does not carry it:
+/// `egui::Modifiers` has Alt, Ctrl, Shift and the Mac command key, and winit's `SUPER`
+/// is dropped on the way in. Sampled on the frame the arrow key arrives in, so it is a
+/// question about a key being held *now*, alongside one this program was told about.
+///
+/// The shell keeps a good deal of the Win key for itself — `Win+Up`/`Win+Down` are Snap,
+/// `Ctrl+Win+Left`/`Right` switch virtual desktop — and those presses never arrive.
+/// `Ctrl+Win+Down` is not on its list and does.
+pub fn super_down() -> bool {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LWIN, VK_RWIN};
+    // SAFETY: a pure query of the keyboard state.
+    [VK_LWIN, VK_RWIN]
+        .into_iter()
+        .any(|key| unsafe { GetAsyncKeyState(key as i32) } as u16 & 0x8000 != 0)
+}
+
 /// A NUL-terminated UTF-16 buffer suitable for `PCWSTR` parameters.
 pub fn wide(s: &str) -> Vec<u16> {
     std::ffi::OsStr::new(s)

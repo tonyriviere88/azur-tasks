@@ -116,6 +116,8 @@ features = [
     "Win32_System_Time",
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
+    # `GetAsyncKeyState`, for the Windows key egui does not report -- see `sys::util::super_down`.
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
     "Win32_Graphics_Gdi",

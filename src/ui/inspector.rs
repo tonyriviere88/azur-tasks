@@ -1099,7 +1099,7 @@ mod tests {
     /// zero-height rect, a strip that eats the rows, a panic in a row callback.
     fn paints(kind: Kind, tab: usize) -> usize {
         let ctx = egui::Context::default();
-        super::super::theme::install(&ctx);
+        super::super::theme::install(&ctx, &Theme::dark());
         let t = Theme::dark();
         let mut panel = InspectorPanel::new(&ctx);
         panel.tab = tab;
@@ -1168,7 +1168,7 @@ mod tests {
     #[test]
     fn copies_every_visible_column_of_a_row() {
         let ctx = egui::Context::default();
-        super::super::theme::install(&ctx);
+        super::super::theme::install(&ctx, &Theme::dark());
         let t = Theme::dark();
         let mut panel = InspectorPanel::new(&ctx);
         // Named, because the panel opens on the graphs now, and they have no rows to
@@ -1233,7 +1233,7 @@ mod tests {
     #[test]
     fn a_note_wraps_inside_the_panel() {
         let ctx = egui::Context::default();
-        super::super::theme::install(&ctx);
+        super::super::theme::install(&ctx, &Theme::dark());
         let t = Theme::dark();
         let notes = [
             denial(Kind::Modules),
@@ -1274,7 +1274,7 @@ mod tests {
     #[test]
     fn shows_nothing_when_no_process_is_selected() {
         let ctx = egui::Context::default();
-        super::super::theme::install(&ctx);
+        super::super::theme::install(&ctx, &Theme::dark());
         let t = Theme::dark();
         let mut panel = InspectorPanel::new(&ctx);
         // Any list will do; the pane the panel opens on has no rows to forget.
@@ -1317,7 +1317,7 @@ mod tests {
     #[test]
     fn graphs_the_selected_process_without_asking_the_collector() {
         let ctx = egui::Context::default();
-        super::super::theme::install(&ctx);
+        super::super::theme::install(&ctx, &Theme::dark());
         let t = Theme::dark();
         let mut panel = InspectorPanel::new(&ctx);
         let proc = fixture(std::process::id());

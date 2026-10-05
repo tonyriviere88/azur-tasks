@@ -4,7 +4,7 @@ use crate::sys::sampler::{self, Monitor};
 use crate::sys::snapshot::Snapshot;
 use crate::ui::app_mark::AppMark;
 use crate::ui::icons::IconCache;
-use crate::ui::theme::{self, Theme};
+use crate::ui::theme::{self, Palette, Theme};
 use crate::ui::{
     details, inspector, performance, processes, sensors, services, startup, summary, Action,
 };
@@ -99,10 +99,25 @@ pub struct App {
 const SENSORS_KEY: &str = "sensors";
 /// And the one the Summary tab's chosen graphics adapter is stored under.
 const SUMMARY_GPU_KEY: &str = "summary.gpu";
+/// The palette, by [`Palette::key`] — the same word the file manager next door writes.
+const THEME_KEY: &str = "theme";
+
+/// What the menu under the title bar's mark asked for.
+#[derive(Clone, Copy)]
+enum AppMenu {
+    ResetSize,
+    SetTheme(Palette),
+}
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, settings: crate::settings::Settings) -> Self {
-        theme::install(&cc.egui_ctx);
+        // An unreadable name falls back to the default rather than refusing to open.
+        let palette = settings
+            .text(THEME_KEY)
+            .and_then(Palette::parse)
+            .unwrap_or_default();
+        let theme = Theme::of(palette);
+        theme::install(&cc.egui_ctx, &theme);
 
         // The sampler pokes egui when a new snapshot lands. This is what makes
         // the app event-driven rather than polled: with no input and no new
@@ -137,7 +152,7 @@ impl App {
 
         Self {
             mon,
-            theme: Theme::dark(),
+            theme,
             icons: IconCache::new(),
             mark: AppMark::default(),
             // The window opens on the summary: it is the page that says whether
@@ -187,6 +202,7 @@ impl App {
     /// ignores writes that do not change the value, so this is free when idle.
     fn sync_settings(&mut self, ctx: &egui::Context) {
         self.settings.set_bool("nav.collapsed", self.nav_collapsed);
+        self.settings.set(THEME_KEY, self.theme.palette.key());
         // Destructured rather than reached through `self`, because the loop needs
         // `settings` mutably and the tabs at the same time: naming the fields is what
         // tells the borrow checker they are distinct.
@@ -288,9 +304,22 @@ impl eframe::App for App {
             ctx.input(|i| i.modifiers.ctrl) && self.tab.holds_order_with_ctrl();
 
         // Global shortcuts.
+        let mut reset_size_key = false;
         ctx.input_mut(|i| {
             if i.consume_key(egui::Modifiers::NONE, egui::Key::F5) {
                 self.mon.refresh_now();
+            }
+            // Ctrl+Win+Down, the file manager's key for the same entry in the same
+            // menu. The Windows key is not among egui's modifiers, so it is asked of
+            // the platform -- and only once Ctrl and the arrow are both there, or
+            // every frame of a keyboard scroll would be a syscall for nothing.
+            // Consumed as Ctrl+Down, so a list does not also move its cursor.
+            if i.modifiers.command
+                && i.key_pressed(egui::Key::ArrowDown)
+                && crate::sys::util::super_down()
+            {
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::ArrowDown);
+                reset_size_key = true;
             }
             // Alt+D toggles the inspector, on the tabs that have one. Consumed
             // whatever the tab, so it never reaches a text field as a character on
@@ -315,7 +344,7 @@ impl eframe::App for App {
             }
         });
 
-        let theme = Theme::dark();
+        let theme = Theme::of(self.theme.palette);
 
         // --- window chrome -------------------------------------------------
         //
@@ -326,6 +355,7 @@ impl eframe::App for App {
         // needs the context, and the closure below already holds the borrow of `self`
         // the window buttons write through.
         let mark = self.mark.icon(&ctx);
+        let mut menu: Option<AppMenu> = None;
         egui::Panel::top("title")
             .exact_size(row::TITLE_BAR)
             .resizable(false)
@@ -355,7 +385,33 @@ impl eframe::App for App {
                     }
                     None => {}
                 }
+                menu = app_menu(ui, &mark, &theme);
             });
+        if reset_size_key {
+            menu = Some(AppMenu::ResetSize);
+        }
+        match menu {
+            Some(AppMenu::ResetSize) => {
+                // Un-maximised first, and said out loud rather than relied on:
+                // `SetWindowPos` on a maximised window happens to restore it on
+                // the way, but that is winit's platform behaviour, not a promise.
+                if self.maximized {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+                    self.maximized = false;
+                }
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
+                    crate::WINDOW_SIZE.into(),
+                ));
+            }
+            Some(AppMenu::SetTheme(palette)) if palette != self.theme.palette => {
+                self.theme = Theme::of(palette);
+                theme::restyle(&ctx, &self.theme);
+                // This frame has painted its title bar in the old palette already;
+                // the next one is all in the new.
+                ctx.request_repaint();
+            }
+            _ => {}
+        }
 
         // Paint-path bisect, present only in a memtrace build.
         #[cfg(feature = "memtrace")]
@@ -629,6 +685,64 @@ pub fn screen_anchor_below(ctx: &egui::Context, widget: Rect) -> Option<(i32, i3
     Some((x.round() as i32, y.round() as i32))
 }
 
+/// The title bar's mark as a button, and the menu it opens: the settings that belong
+/// to the window rather than to a tab. The same entries, in the same order and
+/// words, as the file manager next door has under its own mark.
+///
+/// Called right after `TitleBar::show`, in the same `ui`, so that it is registered
+/// *after* the bar's caption and wins the pointer over it — within a layer egui gives
+/// a click to the last widget that asked for it.
+fn app_menu(
+    ui: &mut Ui,
+    mark: azur::icons::Icon<'_>,
+    t: &Theme,
+) -> Option<AppMenu> {
+    use azur::components::{menu_divider, Menu, MenuItem};
+    use azur::icons::window_restore;
+    use azur::tokens::radius;
+
+    // Where `TitleBar` put its 16-point icon: `space-3` in, centred in the bar.
+    let bar = ui.min_rect();
+    let glyph = Rect::from_min_size(
+        egui::pos2(bar.left() + space::S3, bar.center().y - 8.0),
+        egui::Vec2::splat(16.0),
+    );
+    // The size of a tool button, which is what the file manager's mark is.
+    let button = Rect::from_center_size(glyph.center(), egui::Vec2::splat(row::DENSE));
+    let response = ui.interact(button, ui.id().with("app-menu"), egui::Sense::click());
+    if response.hovered() {
+        // The bar has already painted the mark, so the hover goes over it and the
+        // mark is painted again on top: the one way to get a fill *under* it
+        // without the bar knowing its icon is a button.
+        ui.painter()
+            .rect_filled(button, egui::CornerRadius::same(radius::SMALL), t.bg.control_hover);
+        mark(ui.painter(), glyph, t.text.secondary);
+    }
+
+    let mut chosen = None;
+    Menu::new(&response).min_width(220.0).show(ui.ctx(), |ui| {
+        // The key is read with the other global shortcuts in `App::ui`.
+        if ui
+            .add(
+                MenuItem::new("Reset window size")
+                    .shortcut("Ctrl+Win+↓")
+                    .icon(&window_restore),
+            )
+            .clicked()
+        {
+            chosen = Some(AppMenu::ResetSize);
+        }
+        menu_divider(ui);
+        // The design system's own entry, so every Azur application offers the
+        // palettes the same way: grouped under `Dark themes` and `Light themes`,
+        // the current one ticked. See `azur::palettes::submenu`.
+        if let Some(palette) = azur::palettes::submenu(ui, t.palette) {
+            chosen = Some(AppMenu::SetTheme(palette));
+        }
+    });
+    chosen
+}
+
 #[cfg(test)]
 mod tests {
     /// A bottom panel is only as tall as its content claims, and the inspector's
@@ -644,7 +758,7 @@ mod tests {
     fn a_panel_is_only_as_tall_as_its_content_claims() {
         fn height(claim: bool) -> (f32, f32) {
             let ctx = egui::Context::default();
-            crate::ui::theme::install(&ctx);
+            crate::ui::theme::install(&ctx, &crate::ui::theme::Theme::dark());
             let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
             let (mut got, mut asked) = (0.0, 0.0);
             // Three passes: the first stores the panel state, and a height that only

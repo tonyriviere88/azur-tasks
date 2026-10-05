@@ -42,6 +42,9 @@ static ALLOC: memtrace::Counting = memtrace::Counting;
 /// `build.rs` cannot import it and repeats it for the `.exe`'s version resource.
 pub const PRODUCT_NAME: &str = "Azur Tasks";
 
+/// The window's size on a first run, and what `Reset window size` puts it back to.
+pub const WINDOW_SIZE: [f32; 2] = [800.0, 850.0];
+
 const WINDOW_ICON: &[u8] = include_bytes!("../assets/app-64.png");
 
 /// The graphics configuration, which this program no longer decides.
@@ -105,7 +108,7 @@ fn main() -> eframe::Result<()> {
     let settings = settings::Settings::load();
 
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([800.0, 850.0])
+        .with_inner_size(WINDOW_SIZE)
         // Small enough to park beside something else. The toolbar sheds its
         // caption and the rail collapses to icons, so this stays usable rather
         // than merely permitted.

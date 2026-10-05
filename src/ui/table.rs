@@ -1442,7 +1442,7 @@ mod scroll_tests {
         // Real fonts and the real density: a heading is laid out here, and the
         // scrollbar's width -- which the header subtracts to find its view -- is one
         // of the things the density sets.
-        super::super::theme::install(&ctx);
+        super::super::theme::install(&ctx, &Theme::dark());
         table.x_offset = x;
         let base = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(pane_w, 400.0))),
@@ -1630,7 +1630,7 @@ mod scroll_tests {
     fn the_header_leaves_out_the_columns_scrolled_out_of_view() {
         let t = Theme::dark();
         let ctx = egui::Context::default();
-        super::super::theme::install(&ctx);
+        super::super::theme::install(&ctx, &Theme::dark());
         let mut table = wide();
         table.x_offset = 260.0;
         let out = ctx.run_ui(

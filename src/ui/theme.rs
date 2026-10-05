@@ -6,7 +6,11 @@
 //! module — one hover grey for everything, a selected row on the accent's surface
 //! ramp, nothing structural rounded, 24px rows that touch, one baseline per row.
 //! This window is exactly the shape that module is for, so it opts in whole:
-//! [`Theme::dark`] applies the palette move and [`install`] the density.
+//! [`Palette::build`] applies the palette move and [`install`] the density.
+//!
+//! The palettes themselves are the design system's — the same nine, in the same
+//! order, as the file manager next door offers under its mark. See
+//! [`azur::palettes`].
 //!
 //! What is left here is what only a task manager has an opinion about: which chart
 //! color each resource gets, where the thresholds sit that turn a number amber or
@@ -20,8 +24,13 @@ use azur_egui_theme as azur;
 use egui::{Color32, CornerRadius};
 use std::ops::Deref;
 
+pub use azur::palettes::Palette;
+
 pub struct Theme {
     az: azur::Theme,
+
+    /// Which palette this is, for the tick in the theme menu and the settings file.
+    pub palette: Palette,
 
     // --- graph series ---------------------------------------------------
     pub cpu: Color32,
@@ -46,34 +55,62 @@ impl Deref for Theme {
 }
 
 impl Theme {
+    /// Azur's own dark palette, which is the default.
+    ///
+    /// Test-only: the window's palette comes from the settings file or the menu, and
+    /// both go through [`Theme::of`]. A second way in is how a hard-coded dark theme
+    /// ends up somewhere that should have followed the setting.
+    #[cfg(test)]
     pub fn dark() -> Self {
-        use azur::tokens::{chart, palette, radius};
+        Self::of(Palette::Dark)
+    }
 
-        let mut az = azur::Theme::dark();
-        // The application-window preset: one hover grey shared by every place the
-        // pointer can land, and the two rungs it moves are moved *here*, in the
-        // token, so a hand-painted row and an Azur button agree without either
-        // knowing about the other. See `azur::desktop`.
-        azur::desktop::apply(&mut az);
-        // Azur's canvas is GRAY_0, near-black. The panels are welded together with
-        // seams now, so the canvas is no longer the gap between them -- what is
-        // left of it is the ground the Performance and Sensors cards float on, and
-        // one step up is enough to keep a card's own edge visible there. No other
-        // role depends on it.
-        az.bg.canvas = palette::GRAY_1;
+    /// The palette by name, which is the constructor everything else goes through.
+    pub fn of(palette: Palette) -> Self {
+        use azur::tokens::{chart, palette as tokens, radius};
 
+        // The application-window preset comes with the palette: one hover grey
+        // shared by every place the pointer can land, moved *in the token*, so a
+        // hand-painted row and an Azur button agree without either knowing about
+        // the other. See `azur::desktop` and `Palette::build`.
+        let (mut az, _) = palette.build();
+        if palette == Palette::Dark {
+            // Azur's canvas is GRAY_0, near-black. The panels are welded together
+            // with seams now, so the canvas is no longer the gap between them --
+            // what is left of it is the ground the Performance and Sensors cards
+            // float on, and one step up is enough to keep a card's own edge visible
+            // there. No other role depends on it. The other palettes name their own
+            // canvas, and it is theirs to keep.
+            az.bg.canvas = tokens::GRAY_1;
+        }
+
+        // The accent goes to CPU, the column a reader looks at first. Disk and
+        // network take the status hues on purpose: a green line and a green number
+        // mean the same thing.
+        //
+        // `tokens::chart` is cut for a dark surface, and these colour numbers as
+        // well as lines, so the light side takes the rungs its own accent and
+        // status hues sit on -- the ones Azur's light theme already measured as
+        // text -- and violet and magenta walked down to the same lightness.
+        let [cpu, mem, disk, net, gpu] = if az.dark {
+            [chart::AZURE, chart::VIOLET, chart::GREEN, chart::AMBER, chart::MAGENTA]
+        } else {
+            [
+                tokens::AZURE_60,
+                Color32::from_rgb(0x7c, 0x52, 0xd9),
+                tokens::GREEN_60,
+                tokens::AMBER_60,
+                Color32::from_rgb(0xc7, 0x41, 0x8a),
+            ]
+        };
         Self {
             az,
-
-            // The accent goes to CPU, the column a reader looks at first. Disk and
-            // network take the status hues on purpose: a green line and a green
-            // number mean the same thing.
-            cpu: chart::AZURE,
-            mem: chart::VIOLET,
-            disk: chart::GREEN,
-            net: chart::AMBER,
-            gpu: chart::MAGENTA,
-
+            palette,
+            cpu,
+            mem,
+            disk,
+            net,
+            gpu,
             radius_sm: CornerRadius::same(radius::SMALL),
         }
     }
@@ -112,11 +149,19 @@ impl Theme {
 }
 
 /// Install fonts and the Azur styling on the egui context.
-pub fn install(ctx: &egui::Context) {
+pub fn install(ctx: &egui::Context, t: &Theme) {
     azur::fonts::install(ctx);
+    restyle(ctx, t);
+}
+
+/// The styling alone, for a change of palette: the fonts do not change with it.
+///
+/// Only when the palette changes, never per frame: installing a style throws away
+/// egui's galley and shape caches.
+pub fn restyle(ctx: &egui::Context, t: &Theme) {
     azur::install(
         ctx,
-        &Theme::dark(),
+        t,
         &azur::StyleOptions {
             // Azur's token is 280px, which is written for a hint of a few words.
             // The tooltips here are sentences -- what a column means, why a
