@@ -12,6 +12,17 @@ DLLs, handles and threads inside any process.
 
 ![The Summary page: the whole machine on one screen](docs/summary.png)
 
+<br>
+<p align="center">
+  <a href="https://github.com/tonyriviere88/azur-tasks/releases/latest">
+    <img alt="Download for Windows" src="https://img.shields.io/badge/Download-for%20Windows-0078D4?style=for-the-badge&logo=windows&logoColor=white">
+  </a>
+  <a href="https://github.com/tonyriviere88/azur-tasks/releases">
+    <img alt="Latest release" src="https://img.shields.io/github/v/release/tonyriviere88/azur-tasks?style=for-the-badge&label=latest&color=1f2937">
+  </a>
+</p>
+<br>
+
 # Features
 
 - **light** — at rest it uses a fraction of the CPU Task Manager does, and the status bar
@@ -25,17 +36,6 @@ DLLs, handles and threads inside any process.
 - **sensors** — CPU and GPU temperature, clock, fan and power, as live traces
 - **frame pacing** — FPS, 1 % lows and stutter for the foreground app (run as administrator)
 - **services and startup apps** — see what runs, and switch startup entries on or off
-
-Measured beside the real Task Manager on the same machine, both idle (24 cores, 64 GB RAM,
-~550 processes):
-
-| | Azur Tasks | Windows Task Manager |
-|---|---|---|
-| CPU at rest | **3.0 %** of one core | 20.6 % of one core |
-| Working set | **206 MB** | 238 MB |
-| Threads | **16** | 24 |
-
-One 10 MB executable, with nothing to install beside it.
 
 ## Summary
 
@@ -152,24 +152,6 @@ administrator rights.
 The window goes down to 500 × 400: the sidebar folds to icons and the toolbar and status bar
 give up space gracefully.
 
-# Install
-
-Azur Tasks is built from source. You need Rust, the MSVC toolchain and a Windows SDK; cargo
-fetches the [`azur-egui-theme`](https://github.com/tonyriviere88/azur-egui-theme) dependency
-itself.
-
-```powershell
-cargo build --release
-.\target\release\azur-tasks.exe
-```
-
-`cargo deploy` builds it and copies it to `D:\Programs`, or to `$AZUR_DEPLOY_DIR`, or to a
-folder you name. It can replace a copy that is running.
-
-No administrator rights are needed. Running as administrator adds frame pacing, and fills in
-the rows of protected processes that otherwise show "—". Your window layout and columns are
-kept in `%APPDATA%\Azur Tasks\settings.ini`, which is safe to delete.
-
 # Limitations
 
 - **No per-process network usage** — Windows only gives that to an elevated trace session.
@@ -179,3 +161,18 @@ kept in `%APPDATA%\Azur Tasks\settings.ini`, which is safe to delete.
 - **Services are read-only** — starting and stopping them needs elevation.
 - **GPU figures depend on the driver** — some drivers and most virtual machines publish none,
   and an integrated GPU has no temperature or fan of its own.
+
+# How to build
+
+You need [Rust](https://rustup.rs), the MSVC toolchain and a Windows SDK. Cargo fetches the
+[`azur-egui-theme`](https://github.com/tonyriviere88/azur-egui-theme) dependency itself.
+
+```powershell
+git clone https://github.com/tonyriviere88/azur-tasks.git
+cd azur-tasks
+cargo build --release
+.\target\release\azur-tasks.exe
+```
+
+`cargo deploy` builds it and copies it to `D:\Programs`, or to `$AZUR_DEPLOY_DIR`, or to a
+folder you name. It can replace a copy that is running.
